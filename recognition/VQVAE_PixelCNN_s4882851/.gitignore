@@ -1,0 +1,10 @@
+# Python bytecode caches
+__pycache__/
+*.py[cod]
+
+# Training artefacts: model weights, logs and figures are large and must not
+# be committed (course rule: no datasets or model files in the fork).
+checkpoints/
+outputs/
+*.pt
+*.pth
