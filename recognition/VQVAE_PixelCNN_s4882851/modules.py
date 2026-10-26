@@ -279,21 +279,30 @@ class PixelCNNPrior(nn.Module):
         return F.cross_entropy(logits, codes)
 
     @torch.no_grad()
-    def sample(self, n, device, temperature=1.0):
+    def sample(self, n, device, temperature=1.0, progress=None):
         """Draw n code grids by sequential raster-scan decoding.
 
         Each position is drawn from a softmax over the K logits (scaled by
         `temperature`; 1.0 = the learned distribution). Decoding row-major
         guarantees every position is conditioned only on its predecessors,
         matching the masked receptive fields used in training.
+
+        `progress(done, total)` is an optional callback so callers can show
+        a progress bar/ETA (sequential decoding of 2048 positions is slow
+        enough to look frozen without one); the model itself stays free of
+        non-PyTorch dependencies.
         """
         h, w = self.grid_hw
         codes = torch.zeros(n, h, w, dtype=torch.long, device=device)
+        total, done = h * w, 0
         for i in range(h):
             for j in range(w):
                 logits = self(codes)[:, :, i, j] / temperature
                 probs = F.softmax(logits, dim=1)
                 codes[:, i, j] = torch.multinomial(probs, 1).squeeze(1)
+                done += 1
+                if progress is not None:
+                    progress(done, total)
         return codes
 
 

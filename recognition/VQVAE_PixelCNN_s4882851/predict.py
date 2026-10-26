@@ -34,6 +34,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
+from tqdm import tqdm
 from skimage.metrics import structural_similarity as ssim
 from torchmetrics.image.kid import KernelInceptionDistance
 
@@ -93,7 +94,8 @@ def recon_ssim(model, test, batch_size, device):
     """Mean test SSIM and the fraction of slices meeting the 0.6 criterion."""
     model.eval()
     total, n, passed = 0.0, 0, 0
-    for i in range(0, len(test), batch_size):
+    for i in tqdm(range(0, len(test), batch_size), desc="test SSIM",
+                   leave=False, unit="batch"):
         x = test._cache[i:i + batch_size].to(device)
         x_hat = model(x)[0].cpu()
         for a, b in zip(x.cpu(), x_hat):
@@ -115,7 +117,8 @@ def nearest_train_matches(images, train, device):
     flat = images.reshape(len(images), -1)
     tr = train.reshape(len(train), -1).to(device)
     best_idx, best_dist = [], []
-    for i in range(0, len(flat), 100):
+    for i in tqdm(range(0, len(flat), 100), desc="NN audit",
+                  leave=False, unit="chunk"):
         d = torch.cdist(flat[i:i + 100].to(device), tr)  # [chunk, n_train]
         v, j = d.min(dim=1)
         best_idx.append(j.cpu())
@@ -186,7 +189,10 @@ def main():
         torch.cuda.reset_peak_memory_stats()
     t0 = time.time()
     with torch.no_grad():
-        sampled_codes = prior.sample(args.n_samples, device, temperature=1.0)
+        bar = tqdm(total=64 * 32, desc="sampling codes", unit="pos")
+        sampled_codes = prior.sample(args.n_samples, device, temperature=1.0,
+                                     progress=lambda d, t: bar.update(1))
+        bar.close()
         vq_samples = vqvae.decode_from_codes(sampled_codes).cpu()
     results["vqvae_gen_seconds"] = time.time() - t0
     results["vqvae_gen_peak_vram_gb"] = (

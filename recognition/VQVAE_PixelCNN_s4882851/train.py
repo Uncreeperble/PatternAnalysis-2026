@@ -44,6 +44,7 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from tqdm import tqdm
 from skimage.metrics import structural_similarity as ssim
 
 from dataset import HipMRISlices, verify_patient_splits
@@ -86,7 +87,8 @@ def validation_ssim(model, val, batch_size):
     """
     model.eval()
     total, n = 0.0, 0
-    for i in range(0, len(val), batch_size):
+    for i in tqdm(range(0, len(val), batch_size), desc="validating",
+                   leave=False, unit="batch"):
         x = val._cache[i:i + batch_size] if val._cache is not None else \
             torch.stack([val[j] for j in range(i, min(i + batch_size, len(val)))])
         x_hat = model(x)[0]
@@ -130,7 +132,8 @@ def encode_split(vqvae, data, batch_size, device):
     prior train on compact code grids instead of re-running the encoder.
     """
     codes = []
-    for i in range(0, len(data), batch_size):
+    for i in tqdm(range(0, len(data), batch_size),
+                  desc="encoding", leave=False, unit="batch"):
         if data._cache is not None:
             x = data._cache[i:i + batch_size]
         else:
@@ -179,7 +182,8 @@ def train_prior(args):
         prior.train()
         t0 = time.time()
         nll_sum = batches = 0
-        for codes in loader:
+        for codes in tqdm(loader, desc=f"epoch {epoch}/{args.epochs}",
+                          leave=False, unit="batch"):
             codes = codes.to(device)
             nll = prior.loss(codes)
             opt.zero_grad(set_to_none=True)
@@ -195,7 +199,8 @@ def train_prior(args):
         prior.eval()
         with torch.no_grad():
             val_nll = sum(prior.loss(c.to(device)).item()
-                          for c in torch.split(val_codes, args.batch_size))
+                          for c in tqdm(torch.split(val_codes, args.batch_size),
+                                        desc="validating", leave=False))
             val_nll /= len(torch.split(val_codes, args.batch_size))
         history["train_nll"].append(nll_sum / batches)
         history["val_nll"].append(val_nll)
@@ -413,7 +418,8 @@ def main():
         t0 = time.time()
         recon_sum = vq_sum = 0.0
         perp_sum = batches = 0
-        for x in loader:
+        for x in tqdm(loader, desc=f"epoch {epoch}/{args.epochs}",
+                      leave=False, unit="batch"):
             x = x.to(device, non_blocking=True)
             x_hat, vq_loss, perplexity, _ = model(x)
             recon = F.mse_loss(x_hat, x)

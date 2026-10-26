@@ -24,6 +24,7 @@ import re
 import nibabel as nib
 import numpy as np
 import torch
+from tqdm import tqdm
 from torch.utils.data import Dataset
 
 # Rangpur path to the 2D slice data (override with HIPMRI_ROOT env var if needed).
@@ -111,7 +112,8 @@ class HipMRISlices(Dataset):
         self.flip_p = float(flip_p)
         self._cache = None
         if preload:
-            batch = np.stack([load_slice(p) for p in self.paths])
+            batch = np.stack([load_slice(p) for p in
+                               tqdm(self.paths, desc=f"loading {split}", unit="slice")])
             self._cache = torch.from_numpy(batch).unsqueeze(1)  # [N,1,256,128]
 
     def __len__(self):
