@@ -1,38 +1,28 @@
-#!/bin/bash
-# Slurm batch script for COMP3710 Project 2.4 training/evaluation runs.
-#
-# Usage (from the recognition/VQVAE_PixelCNN_s4882851 directory on Rangpur):
-#   sbatch slurm_train.sh vqvae --epochs 100 --out checkpoints/vqvae   # E1
-#   sbatch slurm_train.sh prior  --vqvae-checkpoint checkpoints/vqvae/vqvae_best.pt --epochs 50 --out checkpoints/prior  # E4
-#   sbatch slurm_train.sh dcgan  --epochs 50 --out checkpoints/dcgan   # E5
-# Evaluation runs use predict.py directly, e.g. in an interactive GPU session:
-#   srun --partition=comp3710 --account=comp3710 --gres=gpu:1 --mem=32G --pty bash
-#   python predict.py --vqvae ... --prior ... --dcgan ... --out outputs
-#
-# One-off environment setup (once per account, inside an interactive CPU job):
-#   pip install --no-cache-dir nibabel scikit-image torchmetrics matplotlib
-
+#!/usr/bin/env bash
+# Optional ONE-OFF training helper. Use campaign.py for the complete gated DAG.
+# Create logs/ BEFORE sbatch; Slurm opens log files before executing this script.
+#   mkdir -p logs
+#   sbatch slurm_train.sh vqvae --epochs 100 --out checkpoints/manual_vq
 #SBATCH --partition=comp3710
 #SBATCH --account=comp3710
+#SBATCH --qos=normal
 #SBATCH --gres=gpu:1
-#SBATCH --mem=32G
-#SBATCH --time=04:00:00
-#SBATCH --job-name=comp3710
-#SBATCH --output=logs/%x_%j.out
-#SBATCH --error=logs/%x_%j.err
+#SBATCH --cpus-per-task=4
+#SBATCH --time=01:30:00
+#SBATCH --job-name=hip_manual
+#SBATCH --output=logs/%x-%j.log
+#SBATCH --error=logs/%x-%j.log
 
-source $HOME/miniconda3/bin/activate
+set -eo pipefail
+source "${CONDA_BASE:-/home/Student/s4882851/miniconda3}/etc/profile.d/conda.sh"
 conda activate torch
-
-cd "$SLURM_SUBMIT_DIR" || exit 1
-echo "Job $SLURM_JOB_ID on $(hostname), started $(date)"
-nvidia-smi
-
-mkdir -p logs checkpoints
-
-# All arguments after the script name are forwarded: $1 is the train.py
-# --model value, the rest are that model's flags.
-MODEL=$1
+set -u
+export PYTHONUNBUFFERED=1
+export MPLBACKEND=Agg
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
+export TORCH_HOME="${HIPMRI_TORCH_HOME:-/home/Student/s4882851/.cache/torch}"
+echo "[$(date -Is)] START job=$SLURM_JOB_ID node=$(hostname)"
+model="${1:?Expected model: vqvae, prior or dcgan}"
 shift
-python train.py --model "$MODEL" "$@"
-echo "finished $(date)"
+python -u "${SLURM_SUBMIT_DIR}/train.py" --model "$model" --device cuda "$@"
+echo "[$(date -Is)] COMPLETE job=$SLURM_JOB_ID"

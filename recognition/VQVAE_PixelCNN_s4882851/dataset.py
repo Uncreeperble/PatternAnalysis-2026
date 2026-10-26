@@ -84,10 +84,13 @@ def load_slice(path):
     arr = nib.load(path).get_fdata(caching="unchanged")
     if arr.ndim == 3:
         arr = arr[:, :, 0]
-    if arr.shape[1] != COLS:  # patient 019 week 1 is 256x144: centre-crop
-        off = (arr.shape[1] - COLS) // 2
-        arr = arr[:, off:off + COLS]
+    if arr.shape == (ROWS, 144):  # the audited width anomaly only
+        arr = arr[:, 8:136]
+    if arr.shape != (ROWS, COLS):
+        raise ValueError(f"unexpected slice shape {arr.shape}: {path}")
     arr = arr.astype(np.float32)
+    if not np.isfinite(arr).all() or (arr < 0).any():
+        raise ValueError(f"non-finite or negative MRI intensity: {path}")
     return arr / max(float(arr.max()), 1e-8)
 
 
@@ -106,14 +109,20 @@ class HipMRISlices(Dataset):
             axial pelvic MRI but is kept off by default for reproducibility).
     """
 
-    def __init__(self, root=DEFAULT_ROOT, split="train", preload=True, flip_p=0.0):
+    def __init__(self, root=DEFAULT_ROOT, split="train", preload=True, flip_p=0.0,
+                 limit=0):
         assert split in SPLITS, f"unknown split '{split}'"
         self.paths = list_split(root, split)
+        if limit:
+            self.paths = self.paths[:limit]
         self.flip_p = float(flip_p)
         self._cache = None
         if preload:
-            batch = np.stack([load_slice(p) for p in
-                               tqdm(self.paths, desc=f"loading {split}", unit="slice")])
+            # Preallocate to avoid a second full-dataset copy at np.stack.
+            batch = np.empty((len(self.paths), ROWS, COLS), dtype=np.float32)
+            for i, path in enumerate(tqdm(self.paths, desc=f"loading {split}",
+                                          unit="slice", mininterval=10)):
+                batch[i] = load_slice(path)
             self._cache = torch.from_numpy(batch).unsqueeze(1)  # [N,1,256,128]
 
     def __len__(self):

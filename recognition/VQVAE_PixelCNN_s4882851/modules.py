@@ -10,7 +10,9 @@ Design rationale (matching the feasibility review):
   * Encoder downsamples 4x with two 4x4 stride-2 convolutions: 256x128 input
     -> 128x64 -> 64x32 latent grid. Downsampling 8x was considered but 4x
     retains more anatomical detail at a PixelCNN sampling cost of 2048
-    tokens per image, which the measured budget allows.
+    tokens per image. An optional third stride-2 stage provides an 8x
+    (32x16) grid ablation. Final runtime is measured independently;
+    feasibility timings do not establish this implementation's runtime.
   * Two residual blocks as in the paper (ReLU-Conv-ReLU-Conv plus identity),
     which ease gradient flow in a shallow encoder.
   * Codebook: K=512 entries of dimension D=64, commitment weight beta=0.25,
@@ -57,13 +59,17 @@ class Encoder(nn.Module):
     convolution projecting to the codebook embedding dimension D.
     """
 
-    def __init__(self, in_channels=1, width=128, latent_dim=64):
+    def __init__(self, in_channels=1, width=128, latent_dim=64, downsample=4):
         super().__init__()
+        if downsample not in (4, 8):
+            raise ValueError("downsample must be 4 or 8")
+        extra = [nn.Conv2d(width, width, 4, stride=2, padding=1), nn.ReLU()] if downsample == 8 else []
         self.net = nn.Sequential(
             nn.Conv2d(in_channels, width, kernel_size=4, stride=2, padding=1),  # 256x128 -> 128x64
             nn.ReLU(),
             nn.Conv2d(width, width, kernel_size=4, stride=2, padding=1),       # 128x64  -> 64x32
             nn.ReLU(),
+            *extra,
             ResidualBlock(width),
             ResidualBlock(width),
             nn.Conv2d(width, latent_dim, kernel_size=1),                       # project to D
@@ -80,12 +86,14 @@ class Decoder(nn.Module):
     a final sigmoid bounds outputs to [0, 1] to match the normalised data.
     """
 
-    def __init__(self, out_channels=1, width=128, latent_dim=64):
+    def __init__(self, out_channels=1, width=128, latent_dim=64, downsample=4):
         super().__init__()
+        extra = [nn.ConvTranspose2d(width, width, 4, stride=2, padding=1), nn.ReLU()] if downsample == 8 else []
         self.net = nn.Sequential(
             nn.Conv2d(latent_dim, width, kernel_size=1),                         # lift from D
             ResidualBlock(width),
             ResidualBlock(width),
+            *extra,
             nn.ConvTranspose2d(width, width, kernel_size=4, stride=2, padding=1),  # 64x32 -> 128x64
             nn.ReLU(),
             nn.ConvTranspose2d(width, out_channels, kernel_size=4, stride=2, padding=1),  # -> 256x128
@@ -129,13 +137,18 @@ class VectorQuantizer(nn.Module):
     def forward(self, z_e):
         # [B*H*W, D] vs [K, D] -> pairwise squared distances [B*H*W, K]
         flat = z_e.permute(0, 2, 3, 1).reshape(-1, self.code_dim)
-        dist = (flat.pow(2).sum(1, keepdim=True)
-                - 2 * flat @ self.codebook.weight.t()
-                + self.codebook.weight.pow(2).sum(1))
-        indices = dist.argmin(dim=1)                       # nearest code per position
-        onehot = F.one_hot(indices, self.num_codes).type(flat.dtype)
-        quantised = onehot @ self.codebook.weight          # embed the chosen codes
-        quantised = quantised.view(z_e.shape)
+        # Chunk the search: a full [B*H*W,K] matrix can consume >1 GB.
+        with torch.no_grad():
+            weights = self.codebook.weight
+            indices = torch.cat([
+                (chunk.square().sum(1, keepdim=True)
+                 - 2 * chunk @ weights.t()
+                 + weights.square().sum(1)).argmin(1)
+                for chunk in flat.split(8192)
+            ])
+        b, _, h, w = z_e.shape
+        quantised = self.codebook(indices).view(b, h, w, self.code_dim)
+        quantised = quantised.permute(0, 3, 1, 2).contiguous()
 
         # Losses (sg = stop-gradient).
         codebook_loss = F.mse_loss(quantised, z_e.detach())
@@ -147,9 +160,11 @@ class VectorQuantizer(nn.Module):
         quantised_st = z_e + (quantised - z_e).detach()
 
         # Usage diagnostics: average assignment distribution over the batch.
-        avg_probs = onehot.mean(dim=0)
+        counts = torch.bincount(indices, minlength=self.num_codes).to(flat.dtype)
+        avg_probs = counts / counts.sum()
         perplexity = torch.exp(-(avg_probs * torch.log(avg_probs + 1e-10)).sum())
-        self.ema_counts.mul_(0.99).add_(onehot.sum(dim=0), alpha=0.01)
+        if self.training:
+            self.ema_counts.mul_(0.99).add_(counts, alpha=0.01)
 
         return quantised_st, loss, perplexity, indices.view(z_e.shape[0], *z_e.shape[2:])
 
@@ -163,11 +178,11 @@ class VQVAE(nn.Module):
     """
 
     def __init__(self, in_channels=1, width=128, latent_dim=64,
-                 num_codes=512, beta=0.25):
+                 num_codes=512, beta=0.25, downsample=4):
         super().__init__()
-        self.encoder = Encoder(in_channels, width, latent_dim)
+        self.encoder = Encoder(in_channels, width, latent_dim, downsample)
         self.quantizer = VectorQuantizer(num_codes, latent_dim, beta)
-        self.decoder = Decoder(in_channels, width, latent_dim)
+        self.decoder = Decoder(in_channels, width, latent_dim, downsample)
 
     def forward(self, x):
         z_e = self.encoder(x)
@@ -183,7 +198,7 @@ class VQVAE(nn.Module):
     @torch.no_grad()
     def decode_from_codes(self, codes):
         """Decode integer code indices [B, H, W] back to images."""
-        z_q = self.quantizer.codebook(codes)  # embed indices to vectors
+        z_q = self.quantizer.codebook(codes).permute(0, 3, 1, 2).contiguous()
         return self.decoder(z_q)
 
 
@@ -194,7 +209,7 @@ class MaskedConv2d(nn.Module):
     """Convolution with a raster-scan receptive-field mask.
 
     The VQ-VAE alone cannot sample: it maps images to codes but learns
-    nothing about which code grids are plausible. A masked (Gated)
+    nothing about which code grids are plausible. A masked residual
     PixelCNN over the discrete indices supplies that distribution
     (van den Oord et al., "Conditional Image Generation with PixelCNN
     Decoders", NeurIPS 2016). Type-A masking is used for the first layer
@@ -207,8 +222,10 @@ class MaskedConv2d(nn.Module):
         super().__init__()
         assert mask_type in ("A", "B")
         self.mask_type = mask_type
+        # Biases allow an unconditional marginal at the first raster position.
+        # With every bias disabled, its logits are identically zero forever.
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size,
-                              padding=padding, bias=False)
+                              padding=padding, bias=True)
         # The mask is a fixed buffer (not learned), built once below.
         self.register_buffer("mask", torch.zeros_like(self.conv.weight))
 
@@ -232,41 +249,43 @@ class PixelCNNPrior(nn.Module):
     Input: integer code grids [B, H, W] (K possible values per position).
     Output: logits [B, K, H, W] giving p(code | previous codes in scan order).
 
-    Architecture: a type-A 7x7 masked convolution lifts the one-hot codes to
+    Architecture: a type-A 7x7 masked convolution lifts embedded codes to
     the feature width, followed by residual blocks of two type-B masked
-    convolutions (as in the PixelCNN paper), and a 1x1 masked convolution
+    convolutions, and a 1x1 masked convolution
     projects back to K logits. Residual connections are used because deeper
     masked stacks otherwise train slowly (a known PixelCNN limitation;
     gated activations are the paper's alternative and can be tried if
     validation NLL plateaus).
 
-    Default size (width 128, 4 blocks) is deliberately moderate: ~10M
-    parameters. Sequential sampling cost scales with model width, so an
-    oversized prior would breach the 15-minute/500-image budget measured
-    at feasibility, while width and depth remain command-line knobs for
-    the prior-capacity experiments.
-
-    Sampling is sequential over positions (measured at feasibility:
-    ~2.8 min for 500 images on an A100, within the 15-minute budget), so the
-    grid size is deliberately kept at 64x32 (2048 tokens).
+    A learned 32-dimensional embedding replaces the K-channel one-hot
+    input. The first mask remains type A, so the current code cannot leak.
+    Residual kernels default to 3x3 to make sequential inference practical;
+    --prior-kernel 7 is a preplanned receptive-field/capacity ablation.
+    Runtime must be measured on this implementation, not extrapolated
+    from the different feasibility smoke-test model.
     """
 
-    def __init__(self, num_codes=512, width=128, num_blocks=4, grid_hw=(64, 32)):
+    def __init__(self, num_codes=512, width=128, num_blocks=4, grid_hw=(64, 32),
+                 embedding_dim=32, kernel_size=3):
         super().__init__()
+        if kernel_size not in (3, 7):
+            raise ValueError("prior kernel must be 3 or 7")
         self.num_codes = num_codes
         self.grid_hw = grid_hw
-        self.input = MaskedConv2d("A", num_codes, width, kernel_size=7, padding=3)
+        self.row_radius = 3 + num_blocks * 2 * (kernel_size // 2)
+        self.embedding = nn.Embedding(num_codes, embedding_dim)
+        self.input = MaskedConv2d("A", embedding_dim, width, kernel_size=7, padding=3)
         self.blocks = nn.ModuleList()
         for _ in range(num_blocks):
             self.blocks.append(nn.ModuleDict({
-                "conv1": MaskedConv2d("B", width, width, kernel_size=7, padding=3),
-                "conv2": MaskedConv2d("B", width, width, kernel_size=7, padding=3),
+                "conv1": MaskedConv2d("B", width, width, kernel_size, kernel_size // 2),
+                "conv2": MaskedConv2d("B", width, width, kernel_size, kernel_size // 2),
             }))
         self.out = MaskedConv2d("B", width, num_codes, kernel_size=1, padding=0)
 
     def forward(self, codes):
         """codes: [B, H, W] integers -> logits [B, K, H, W]."""
-        x = F.one_hot(codes, self.num_codes).permute(0, 3, 1, 2).float()
+        x = self.embedding(codes).permute(0, 3, 1, 2).contiguous()
         x = self.input(x)
         for blk in self.blocks:
             h = F.relu(blk["conv1"](F.relu(x)))
@@ -292,12 +311,19 @@ class PixelCNNPrior(nn.Module):
         enough to look frozen without one); the model itself stays free of
         non-PyTorch dependencies.
         """
+        if n < 1 or temperature <= 0:
+            raise ValueError("n and temperature must be positive")
+        self.eval()
         h, w = self.grid_hw
         codes = torch.zeros(n, h, w, dtype=torch.long, device=device)
         total, done = h * w, 0
         for i in range(h):
             for j in range(w):
-                logits = self(codes)[:, :, i, j] / temperature
+                # Only preceding rows inside the finite receptive field
+                # can affect this position. Regression-tested against the
+                # full-grid logits; no change to the sampled distribution.
+                top = max(0, i - self.row_radius)
+                logits = self(codes[:, top:i + 1])[:, :, i - top, j] / temperature
                 probs = F.softmax(logits, dim=1)
                 codes[:, i, j] = torch.multinomial(probs, 1).squeeze(1)
                 done += 1
@@ -376,6 +402,7 @@ class DCDiscriminator(nn.Module):
             *block(width, width * 2),
             *block(width * 2, width * 4),
             *block(width * 4, width * 8),
+            *block(width * 8, width * 8),
             # 8x4 head: an (8,4) kernel reduces the whole map to one logit
             # per sample (a 4x4 kernel would leave a 5x1 map).
             nn.utils.spectral_norm(

@@ -28,8 +28,12 @@ DCGAN baseline instead maps Gaussian noise directly to pixels through a
 resize-convolution generator adversarially trained against a
 spectral-normalised discriminator.
 
-![Pipeline overview](figures/overview.png)
-*(figure to be added)*
+```text
+MRI -> encoder -> nearest codebook entry -> decoder -> reconstruction
+                    |
+                    +-> frozen code grids -> masked PixelCNN -> new grids -> decoder
+Gaussian noise -> resize-convolution DCGAN generator -> unconditional images
+```
 
 ## Repository layout
 
@@ -39,12 +43,22 @@ spectral-normalised discriminator.
 | `dataset.py` | Nifti loading, preprocessing, leakage-free patient-level splits |
 | `train.py` | Training/validation/checkpointing for all three models |
 | `predict.py` | Evaluation driver: SSIM, KID, memorisation audit, figures |
-| `slurm_train.sh` | Slurm batch script for the Rangpur HPC |
+| `runtime.py` | Atomic artifacts, configuration/provenance, RNG and resume state |
+| `campaign.py` | Complete predeclared Slurm DAG, monitor and artifact collector |
+| `slurm_job.sh` | Campaign launcher with exit propagation and 30-second heartbeat |
+| `slurm_train.sh` | Optional one-off training helper (not the full campaign) |
+| `smoke_pipeline.py` | Real-Nifti training/evaluation and resume checks |
+| `test_*.py` | Equation, causality, shape, gradient and scheduler regression tests |
+| `EXPERIMENT_PLAN.md` | Fixed settings, backups, selection rules and limitations |
 
 ## Dependencies and reproducibility
 
-- Python 3.11, PyTorch (CUDA), nibabel, scikit-image, torchmetrics, matplotlib
-- Exact versions used for the reported results: *(to be added after final runs)*
+- Rangpur environment verified 26 October: Python 3.11, torch 2.13.0+cu130,
+  torchvision 0.28.0+cu130, torchmetrics 1.9.0, torch-fidelity 0.4.0,
+  nibabel 5.4.2, scikit-image 0.26.0, matplotlib 3.11.2, tqdm 4.70.0, NumPy.
+- KID needs **torch-fidelity** and Inception weights, not just torchmetrics.
+  Weights are prefetched into a persistent `TORCH_HOME` outside Git.
+- Preserve the campaign environment snapshot alongside reported results.
 - All training runs are seeded (`--seed 0` default); every training script
   re-verifies patient-level split disjointness at startup.
 
@@ -63,7 +77,60 @@ python predict.py --vqvae checkpoints/vqvae/vqvae_best.pt \
     --dcgan checkpoints/dcgan/dcgan_G.pt --out outputs
 ```
 
-On Rangpur, use `sbatch slurm_train.sh <model> [flags]` (see script header).
+### Complete campaign (preferred)
+
+From this project directory on Rangpur, after activating the course torch
+environment:
+
+```bash
+python campaign.py plan --root campaigns/oct26
+python campaign.py submit --manifest campaigns/oct26/manifest.json --test-only
+python campaign.py submit --manifest campaigns/oct26/manifest.json
+python campaign.py monitor --manifest campaigns/oct26/manifest.json --watch
+```
+
+The 25-task plan submits all main/backup trainings, priors, evaluations,
+temperature comparisons and collection immediately, with success dependencies.
+**Do not submit a second copy of an existing campaign.** Job IDs are saved
+after every submission. `--continue` fills only missing submissions after a
+submission interruption; it does not retry failed experiments.
+
+Batch scripts omit `--mem` because this cluster's Slurm memory accounting
+does not reflect physical node RAM. Logs must exist before Slurm launches;
+the campaign submitter creates them. The original one-off helper is optional:
+`mkdir -p logs` then `sbatch slurm_train.sh <model> [flags]`.
+
+Training has durable batch progress/ETA lines every 30 seconds, CSV/plots
+each epoch, best weights, `latest.pt` with optimizer/RNG state, and status JSON.
+Use exactly the same flags plus `--resume` for an interrupted training run.
+Existing run directories reject accidental overwrites. Evaluation also
+retains sampling caches guarded by configuration and checkpoint checksums.
+
+### Local validation / remote monitoring
+
+```bash
+python -m unittest discover -p 'test_*.py' -v
+python smoke_pipeline.py --data-root /path/to/small/real/split/data \
+    --out /path/outside/git/smoke --device cpu
+python campaign.py monitor --remote s4882851@rangpur.compute.eait.uq.edu.au \
+    --manifest /home/Student/s4882851/PatternAnalysis-2026/recognition/VQVAE_PixelCNN_s4882851/campaigns/oct26/manifest.json \
+    --watch
+```
+
+`--limit` and `--skip-kid` are debug-only; official evaluations cannot skip KID.
+CPU smoke outputs are not evidence of final fidelity. The 17 regression
+tests and main/backup real-data CLI paths passed locally. CPU resumed runs
+matched uninterrupted runs bit-for-bit; CUDA execution is separately gated.
+
+### Retrieve report artifacts
+
+The final CPU collector creates
+`campaigns/oct26/report_artifacts.tar.gz` with figures, JSON/CSV/Markdown
+and logs, excluding Nifti data and model weights. Copy that archive with
+`scp` and check `campaign_results.json` for `complete: true`, no missing
+evaluations and no failed/unverified tasks. Queue access and final quality
+cannot be guaranteed by submitting a plan. See `EXPERIMENT_PLAN.md` for
+metrics, selection rules, resource interpretation and human review work.
 
 ## Data and preprocessing
 
@@ -122,6 +189,11 @@ sampling extrapolates to 2.8 minutes for 500 images. A 3-epoch DCGAN
 generated 500 images in 0.12 s but produced banded, near-identical samples
 (pixel std 0.067 vs 0.130 real). The pipeline fits the budget; sample quality
 was the open risk.
+
+These numbers are **separate preliminary evidence** from the feasibility
+implementation. Corrections and architecture changes in this repository
+require new quality, memory and runtime measurements; preliminary timings
+cannot establish official results or acceptance-criterion compliance.
 
 ### Risks, budget and fallback
 

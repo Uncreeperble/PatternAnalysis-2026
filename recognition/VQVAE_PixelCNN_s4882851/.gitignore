@@ -6,5 +6,7 @@ __pycache__/
 # be committed (course rule: no datasets or model files in the fork).
 checkpoints/
 outputs/
+campaigns/
+logs/
 *.pt
 *.pth
