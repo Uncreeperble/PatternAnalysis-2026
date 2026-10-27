@@ -247,9 +247,22 @@ runs. It is not a privacy guarantee, and it cannot rule out near-copies.
 
 ### 6.4 Failure autopsies
 
-**[TODO] Three to five failure cases**, selected from the failure-candidate
-figures and reviewed by the student. Each should name the artefact observed,
-the likely trigger, and whether it is a reconstruction or a sampling failure.
+Four cases were selected by fixed numeric rules from the selected model's audit
+files (`vqvae_prior_audit.csv`, `reconstruction_scores.csv`), not by eye. The
+visual description of each case is still to be written after the student
+reviews the image.
+
+| Case | Rule | Evidence | Nearest training slice | Visual description |
+|---|---|---|---|---|
+| A. Sample #731 | Lowest nearest-reference SSIM (generated) | SSIM 0.086; L2 RMSE to training 0.203 | case_019, week 1, slice 51 | [TODO] |
+| B. Sample #1004 | Closest to any training slice | RMSE 0.1025, below the calibrated 0.1207 screen; SSIM 0.26 | case_019, week 1, slice 57 | [TODO] |
+| C. Sample #227 | Furthest from training (most distinct) | RMSE 0.2514 | case_010, week 5, slice 59 | [TODO] |
+| D. Reconstruction, patient 042 | Lowest reconstruction SSIM | SSIM 0.9135 (the minimum is still above 0.6) | itself | [TODO] |
+
+Observation to check: two of the four cases (A and B) have their nearest
+training slice from patient 019, the scan that was cropped from 256×144. This may be
+a coincidence, or the cropped scan may be over-represented in the training data.
+It needs checking before any claim is made.
 
 ## 7. Limitations
 
