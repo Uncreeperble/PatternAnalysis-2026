@@ -144,7 +144,9 @@ to [0, 1] (raw intensities span 0-1212 and vary per scan), and the single
 
 ## Feasibility review
 
-*(The one-page feasibility review, as signed off at the practical check-off.)*
+*Summary of the one-page feasibility review written before the experiments
+(source: `feasibility_review.tex`). Its pre-experiment plan and risks are
+retained below; the results that followed are in the Results section.*
 
 ### User need, scope and acceptance criteria
 
