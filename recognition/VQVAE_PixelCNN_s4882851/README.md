@@ -206,19 +206,115 @@ if the prior cannot be completed.
 
 ## Results
 
-*(Quantitative results to be filled in after the experiment runs: test SSIM,
-perplexity, KID table, resource profiling.)*
+All numbers below come from the frozen 25-job campaign (`campaigns/oct26`),
+using the 540 held-out test slices (3 patients) unless stated otherwise.
+
+**Reconstruction fidelity (SSIM, test).** The selected VQ-VAE (L1 loss, seed 0)
+reaches mean SSIM **0.9425**, with 540/540 reconstructions >= 0.6. Main-config
+seeds 0/1 give 0.9414 and 0.9432. Codebook use: 199/512 codes, perplexity 130.9.
+
+**Generated-sample fidelity (supplementary SSIM).** The teaching team clarified
+that the SSIM > 0.6 target applies to reconstructions, so this comparison is
+supplementary. Each generated image is compared with its nearest held-out real
+slice by pixel L2. We ran the identical protocol on real scans to calibrate it
+(`real_control.py`, output `real_control.json`):
+
+| Cohort (nearest-reference SSIM) | Mean | Median | Max | Fraction >= 0.6 |
+|---|---:|---:|---:|---:|
+| Real test scans (control) | 0.2504 | 0.2451 | 0.3417 | 0.000 |
+| VQ-VAE + PixelCNN prior (L1, seed 0) | 0.1827 | - | - | 0.000 |
+| DCGAN (seed 0) | 0.2154 | - | - | 0.000 |
+
+**Interpretation.** Following the teaching-team clarification that the SSIM > 0.6
+target applies to test-set reconstructions (each test slice against its own
+reconstruction), the criterion is met: reconstruction SSIM is 0.9425. The
+unpaired generated-sample comparison is supplementary. Genuine patient scans
+only reach 0.25 under that protocol, so it cannot be used as the pass criterion;
+generated samples (0.18) sit just below that real-data band.
+
+**Distribution fidelity (KID, 1,500 samples per model, test set).**
+
+| Run | VQ-VAE + prior KID | DCGAN KID |
+|---|---:|---:|
+| Seed 0 | 0.4218 (L1) / 0.3734 (main) | 0.4890 |
+| Seed 1 | 0.4308 (main) | 0.2830 |
+
+Lower is better. The two seeds disagree in the baseline's favour on the second
+run, so **no consistent winner is claimed**. The K128 ablation scores 0.3478,
+but it is a test-set observation and was not used for selection.
+
+**Memorisation screen.** For every cohort, zero generated images exactly match
+a training slice after uint8 conversion, and all sampled images are unique.
+L1 has 3.9% of samples below the validation-calibrated nearest-neighbour
+threshold. This is a screening result, not a privacy guarantee.
+
+**Resource profile (A100-PCIE-40GB).**
+
+| Model | Epoch time (s) | Peak training VRAM (GB) | Time for 500 samples |
+|---|---:|---:|---:|
+| VQ-VAE (L1) | 8.21 | 1.03 | - |
+| PixelCNN prior (L1) | 7.85 | 0.68 | ~40 s |
+| DCGAN | 8.65 | 1.01 | ~0.08 s |
+
+Parameter counts were not recorded by the campaign, so they are not reported
+here. Total GPU allocation for the campaign was 3.03 hours (2.53 hours of
+training).
+
+**Summary.** Reconstruction is strong and the pipeline is reproducible. Generation
+quality is mixed: the prior is about 500x slower per sample than the DCGAN, its
+KID is not consistently better, and its unpaired-reference SSIM is only slightly
+below real data. These are the trade-offs carried into the manager recommendation.
 
 ## Investigation of the open research dilemma
 
-*(To be completed after experiments: baseline comparison, failure autopsies
-of 3-5 flawed generations, memorisation audit interpretation, and the
-engineering recommendation to the project manager.)*
+**Baseline comparison.** Against the DCGAN baseline, the VQ-VAE + PixelCNN
+prior has no consistent advantage in distribution fidelity: KID is 0.42 (L1)
+and 0.37/0.43 across two VQ-VAE seeds, versus 0.49 and 0.28 for two DCGAN seeds.
+Reconstruction is strong (SSIM 0.94), but reconstruction does not measure novel
+generation. The DCGAN is roughly 500x faster per sample (0.08 s vs ~40 s per 500).
+
+**Memorisation and privacy.** No generated image is an exact copy of a training
+slice. Some generated samples do fall below the validation-calibrated
+nearest-neighbour threshold (3.9% for the selected prior; 13.2% at the lower
+sampling temperature), so proximity to training scans is a real trade-off and
+not absent. This is evidence against verbatim copying in these runs.
+It is not a privacy guarantee: nearest-neighbour checks cannot rule out
+near-copies or attribute leakage, and no formal differential-privacy bound
+was applied.
+
+**Failure autopsies (3-5 cases).** *To be completed after visual review of
+`failure_candidates` and `worst_reconstructions` figures. Each case should name
+the observed artefact (e.g. boundary blurring, implausible tissue junction,
+mode repetition), the likely trigger, and whether it is a reconstruction or a
+prior-sampling failure.*
+
+**Engineering recommendation for the project manager.** For reconstruction-based
+downstream tasks, the VQ-VAE is suitable under the reported fidelity. For
+unconditional synthetic cohorts, neither model is yet clinically validated:
+the prior's samples are slower to produce and do not clearly beat the DCGAN on
+KID. We recommend (1) human expert review of generated samples before any
+downstream use, (2) treating the memorisation screen as a screen only, and (3)
+evaluating FID and a larger held-out cohort before sharing any synthetic data.
 
 ## Artificial Intelligence Usage Disclosure
 
-*(To be completed: AI tools used, tasks assisted, and how the outputs were
-audited and verified.)*
+**Tools used:** DeepSeek (agentic coding assistant) and Claude (analysis and
+report drafting). The design decisions, experiment selection and final
+judgements are the author's own.
+
+**Tasks assisted:**
+- DeepSeek: scaffolding and completing the model, training, evaluation and
+  campaign code; generating the figures and plotting scripts; drafting the
+  README and maintaining the project's status record.
+- Claude: reviewing the experimental results and helping draft the analysis
+  and conclusions in this report.
+
+**Verification:** The author checked AI-generated code by running the
+regression tests and by running the pipeline on the real HipMRI split. Reported
+numbers were cross-checked against the raw `campaign_results.json` output
+rather than taken from generated text. The real-to-real SSIM control was run
+to test the metric's interpretation. [Author to confirm which code was read
+line by line and which parts were tested only.]
 
 ## References
 
