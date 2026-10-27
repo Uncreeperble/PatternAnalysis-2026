@@ -2,321 +2,288 @@
 
 **Student:** Ben Evans (s4882851) &mdash; Hard difficulty &mdash; PyTorch
 
-## Description
+> **Status: work in progress.** This is a draft of the report. Sections marked
+> *[TODO]* are pending figures, failure-case review, or the student's own
+> annotation, and will be completed before submission.
 
-Medical imaging research is constrained by patient privacy laws (HIPAA, GDPR)
-and limited scan availability, so synthetic cohorts promise anonymous,
-shareable data. However a generative model that merely *memorises* training
-scans would leak patient data, and one that *hallucinates* impossible anatomy
-would poison downstream research. This project builds a **VQ-VAE with a
-PixelCNN prior** (van den Oord et al., 2017) that generates synthetic 2D
-prostate MRI slices from the HipMRI study, and benchmarks it against a
-**DCGAN** baseline (Radford et al., 2016) to investigate this
-fidelity&ndash;memorisation&ndash;privacy trilemma.
+## 1. Problem and description
 
-## How it works
+Medical imaging research is limited by patient privacy rules (HIPAA, GDPR) and
+by how few clinical scans are available. Synthetic scans could help, but a
+generator that memorises training scans leaks patient data, and one that
+produces anatomically impossible structures would mislead downstream models.
+This project builds a **VQ-VAE with a PixelCNN prior** (van den Oord et al.,
+2017) that generates synthetic 2D prostate MRI slices from the HipMRI study,
+and compares it with a **DCGAN** baseline (Radford et al., 2016). The aim is to
+investigate the trade-off between fidelity, memorisation and privacy.
 
-The VQ-VAE encoder maps each 256x128 slice to a 64x32 grid of discrete
-latents, each quantised to its nearest entry in a learned 512-entry codebook
-(straight-through gradients carry decoder gradients past the quantisation).
-The decoder reconstructs the slice from the quantised grid. Because the
-autoencoder alone cannot *sample* new grids, a PixelCNN prior is trained on
-the discrete code indices with masked convolutions (type-A then type-B,
-enforcing the raster-scan autoregressive factorisation). New slices are
-synthesised by sampling code grids from the prior and decoding them. The
-DCGAN baseline instead maps Gaussian noise directly to pixels through a
-resize-convolution generator adversarially trained against a
-spectral-normalised discriminator.
+## 2. How the algorithm works
 
-```text
-MRI -> encoder -> nearest codebook entry -> decoder -> reconstruction
-                    |
-                    +-> frozen code grids -> masked PixelCNN -> new grids -> decoder
-Gaussian noise -> resize-convolution DCGAN generator -> unconditional images
-```
+A VQ-VAE encodes each slice into a grid of discrete codes and decodes codes back
+into an image. The encoder maps a 256×128 slice to a 64×32 grid of latent
+vectors. Each vector is replaced by its nearest entry in a learned 512-entry
+codebook, and the decoder reconstructs the slice from the quantised grid.
+Gradients pass through the quantisation with a straight-through estimator.
 
-## Repository layout
+A VQ-VAE alone cannot sample new images, because it does not model which code
+grids are plausible. A **PixelCNN prior** is therefore trained on the code
+indices. It uses masked convolutions so that each code depends only on codes
+earlier in raster order. To generate, the prior samples a 64×32 code grid one
+position at a time, and the decoder turns that grid into a slice.
 
-| File | Purpose |
-|------|---------|
-| `modules.py` | VQ-VAE, PixelCNN prior and DCGAN model components (pure PyTorch) |
-| `dataset.py` | Nifti loading, preprocessing, leakage-free patient-level splits |
-| `train.py` | Training/validation/checkpointing for all three models |
-| `predict.py` | Evaluation driver: SSIM, KID, memorisation audit, figures |
-| `runtime.py` | Atomic artifacts, configuration/provenance, RNG and resume state |
-| `campaign.py` | Complete predeclared Slurm DAG, monitor and artifact collector |
-| `slurm_job.sh` | Campaign launcher with exit propagation and 30-second heartbeat |
-| `slurm_train.sh` | Optional one-off training helper (not the full campaign) |
-| `smoke_pipeline.py` | Real-Nifti training/evaluation and resume checks |
-| `test_*.py` | Equation, causality, shape, gradient and scheduler regression tests |
-| `EXPERIMENT_PLAN.md` | Fixed settings, backups, selection rules and limitations |
+The DCGAN baseline maps Gaussian noise directly to images through a generator,
+trained adversarially against a discriminator.
 
-## Dependencies and reproducibility
+> **[Diagram placeholder: VQ-VAE architecture and PixelCNN sampling flow.
+> To be replaced with a proper diagram, produced with the student in a later
+> session.]**
 
-- Rangpur environment verified 26 October: Python 3.11, torch 2.13.0+cu130,
-  torchvision 0.28.0+cu130, torchmetrics 1.9.0, torch-fidelity 0.4.0,
-  nibabel 5.4.2, scikit-image 0.26.0, matplotlib 3.11.2, tqdm 4.70.0, NumPy.
-- KID needs **torch-fidelity** and Inception weights, not just torchmetrics.
-  Weights are prefetched into a persistent `TORCH_HOME` outside Git.
-- Preserve the campaign environment snapshot alongside reported results.
-- All training runs are seeded (`--seed 0` default); every training script
-  re-verifies patient-level split disjointness at startup.
-
-## Usage
-
-```bash
-# Train the VQ-VAE (E1)
-python train.py --model vqvae --epochs 100 --out checkpoints/vqvae
-# Train the PixelCNN prior on the frozen VQ-VAE (E4)
-python train.py --model prior --vqvae-checkpoint checkpoints/vqvae/vqvae_best.pt --out checkpoints/prior
-# Train the DCGAN baseline (E5)
-python train.py --model dcgan --epochs 50 --out checkpoints/dcgan
-# Evaluate everything (SSIM, KID, memorisation audit, figures)
-python predict.py --vqvae checkpoints/vqvae/vqvae_best.pt \
-    --prior checkpoints/prior/prior_best.pt \
-    --dcgan checkpoints/dcgan/dcgan_G.pt --out outputs
-```
-
-### Complete campaign (preferred)
-
-From this project directory on Rangpur, after activating the course torch
-environment:
-
-```bash
-python campaign.py plan --root campaigns/oct26
-python campaign.py submit --manifest campaigns/oct26/manifest.json --test-only
-python campaign.py submit --manifest campaigns/oct26/manifest.json
-python campaign.py monitor --manifest campaigns/oct26/manifest.json --watch
-```
-
-The 25-task plan submits all main/backup trainings, priors, evaluations,
-temperature comparisons and collection immediately, with success dependencies.
-**Do not submit a second copy of an existing campaign.** Job IDs are saved
-after every submission. `--continue` fills only missing submissions after a
-submission interruption; it does not retry failed experiments.
-
-Batch scripts omit `--mem` because this cluster's Slurm memory accounting
-does not reflect physical node RAM. Logs must exist before Slurm launches;
-the campaign submitter creates them. The original one-off helper is optional:
-`mkdir -p logs` then `sbatch slurm_train.sh <model> [flags]`.
-
-Training has durable batch progress/ETA lines every 30 seconds, CSV/plots
-each epoch, best weights, `latest.pt` with optimizer/RNG state, and status JSON.
-Use exactly the same flags plus `--resume` for an interrupted training run.
-Existing run directories reject accidental overwrites. Evaluation also
-retains sampling caches guarded by configuration and checkpoint checksums.
-
-### Local validation / remote monitoring
-
-```bash
-python -m unittest discover -p 'test_*.py' -v
-python smoke_pipeline.py --data-root /path/to/small/real/split/data \
-    --out /path/outside/git/smoke --device cpu
-python campaign.py monitor --remote s4882851@rangpur.compute.eait.uq.edu.au \
-    --manifest /home/Student/s4882851/PatternAnalysis-2026/recognition/VQVAE_PixelCNN_s4882851/campaigns/oct26/manifest.json \
-    --watch
-```
-
-`--limit` and `--skip-kid` are debug-only; official evaluations cannot skip KID.
-CPU smoke outputs are not evidence of final fidelity. The 17 regression
-tests and main/backup real-data CLI paths passed locally. CPU resumed runs
-matched uninterrupted runs bit-for-bit; CUDA execution is separately gated.
-
-### Retrieve report artifacts
-
-The final CPU collector creates
-`campaigns/oct26/report_artifacts.tar.gz` with figures, JSON/CSV/Markdown
-and logs, excluding Nifti data and model weights. Copy that archive with
-`scp` and check `campaign_results.json` for `complete: true`, no missing
-evaluations and no failed/unverified tasks. Queue access and final quality
-cannot be guaranteed by submitting a plan. See `EXPERIMENT_PLAN.md` for
-metrics, selection rules, resource interpretation and human review work.
-
-## Data and preprocessing
-
-The HipMRI 2D slice data (`keras_slices_data`) contain 12,660 slices from 38
-patients: 11,460 train (31 patients), 660 validation (4 patients), 540 test
-(3 patients). The splits are provided at patient level and are re-verified
-disjoint at runtime in every script (a single leaked patient would invalidate
-every privacy claim). Preprocessing: each slice is scaled by its own maximum
-to [0, 1] (raw intensities span 0-1212 and vary per scan), and the single
-256x144 scan (patient 019, week 1) is centre-cropped to 256x128.
-
-## Feasibility review
+## 3. Feasibility review
 
 *Summary of the one-page feasibility review written before the experiments
-(source: `feasibility_review.tex`). Its pre-experiment plan and risks are
-retained below; the results that followed are in the Results section.*
+(source: `feasibility_review.tex`).*
 
-### User need, scope and acceptance criteria
+**User need.** Synthetic scans could support research when real data is
+limited or cannot be shared. Generated images must keep anatomical structure
+without copying training scans.
 
-Synthetic medical images could support research when real patient data is
-limited or cannot be shared due to privacy constraints. However, generated
-images must preserve anatomical structure without simply reproducing training
-examples. This project investigates these trade-offs using 2D HipMRI slices,
-comparing a VQ-VAE with a PixelCNN prior against a DCGAN baseline.
+**Acceptance criteria (as planned).**
+- Reconstruction: mean SSIM ≥ 0.6 between held-out slices and their
+  reconstructions.
+- Generation: 500 samples per unconditional model, compared with held-out real
+  slices by Kernel Inception Distance (KID).
+- Diversity: codebook use and distinct entries; uncurated grids.
+- Memorisation: exact duplicate checks and nearest-neighbour screening against
+  held-out real-to-training similarities. This is a screen, not a privacy
+  guarantee.
+- Compute: 3 hours of training, and 500 samples within 15 minutes.
 
-Acceptance criteria:
+**Preliminary evidence.** A 5-epoch smoke test gave held-out SSIM 0.624 but
+used only 13 of 512 codes (perplexity 6.8). A PixelCNN on those codes cut
+cross-entropy from 6.24 to 0.63. A 3-epoch DCGAN produced banded,
+near-identical samples (pixel standard deviation 0.067 against 0.130 for real
+slices). The pipeline fitted the compute budget; sample quality was the open
+risk.
 
-- Reconstruction fidelity: mean SSIM >= 0.6 between held-out images and their
-  VQ-VAE reconstructions.
-- Generation: 500 samples from each unconditional model, compared by Kernel
-  Inception Distance (KID) against held-out real images.
-- Diversity: codebook utilisation and distinct entries used; sample variety
-  assessed with uncurated grids and feature-space metrics.
-- Memorisation risk: check for duplicates and compare generated-to-training
-  similarity against held-out real-to-training similarities (a screening
-  test, not a privacy guarantee).
-- Computational feasibility: provisional budget of 3 hours training, 500
-  images within 15 minutes.
+**Planned mitigations.** Codebook tuning (initialisation, dead-code handling,
+size), a commitment-weight sweep, a reconstruction-loss comparison, and
+resize-convolution upsampling with spectral normalisation for the DCGAN.
 
-### Model choice and course concepts
+## 4. Data
 
-The VQ-VAE (van den Oord et al., 2017) encoder maps images to latents
-quantised to a learned codebook; the decoder reconstructs from the discrete
-grid. A PixelCNN autoregressive prior learns the distribution of code
-indices so new grids can be sampled and decoded. A DCGAN (Radford et al.,
-2016) provides an unconditional baseline. Course content covered practical
-implementations of both VQ-VAE and GAN models.
+### 4.1 Source and layout
 
-### Preliminary feasibility evidence (smoke test)
+The HipMRI prostate study provides 2D slices in `keras_slices_data`, split into
+train, validation and test folders. The dataset is not redistributed in this
+repository.
 
-The VQ-VAE followed the paper architecture (two 4x4 stride-2 convolutions
-giving a 64x32 latent grid, two residual blocks, 512-entry codebook of
-dimension 64, beta=0.25, Adam 2e-4, width 128). A 5-epoch A100 smoke test
-reached held-out SSIM 0.624 (78% of slices >= 0.6) at 6.9 s/epoch and
-3.39 GB peak, but used only 13/512 codes (perplexity 6.8). A 2.13M-parameter
-PixelCNN on the frozen codes cut cross-entropy from 6.24 to 0.63; measured
-sampling extrapolates to 2.8 minutes for 500 images. A 3-epoch DCGAN
-generated 500 images in 0.12 s but produced banded, near-identical samples
-(pixel std 0.067 vs 0.130 real). The pipeline fits the budget; sample quality
-was the open risk.
+### 4.2 Audit findings
 
-These numbers are **separate preliminary evidence** from the feasibility
-implementation. Corrections and architecture changes in this repository
-require new quality, memory and runtime measurements; preliminary timings
-cannot establish official results or acceptance-criterion compliance.
+| Property | Finding | Consequence |
+|---|---|---|
+| Slices | 12,660 in total; 11,460 train (31 patients, 191 scans), 660 validation (4 patients), 540 test (3 patients) | Splits are about 90.5 / 5.2 / 4.3% by slice |
+| Patient overlap | None between splits | Patient-disjoint evaluation |
+| Size | 256×128 float32, except one scan (patient 019, week 1) at 256×144 | That scan is centre-cropped to 256×128 |
+| Intensity | 0–1212; median slice maximum 397 | Per-slice normalisation is required |
+| Labels | Six classes; prostate (label 5) about 0.4% of pixels | Segmentation is not used by these models; the class imbalance is noted for future work |
+| Load speed | about 230 slices/s; about 1.7 GB in RAM | Full set kept in memory |
 
-### Risks, budget and fallback
+The audit figures are in `data_exploration/` in the project folder and will be
+added to this section in a later commit.
 
-Risks: blurry reconstructions, codebook under-utilisation, poor samples,
-DCGAN instability, memorisation, limited compute. Mitigations: loss and
-codebook tuning (EMA updates, dead-code resets, K/beta sweeps), resize-
-convolution upsampling and spectral norm for the DCGAN, early stopping and
-augmentation against memorisation, and reporting reconstruction-only results
-if the prior cannot be completed.
+### 4.3 Preprocessing
 
-## Results
+Each slice is divided by its own maximum to map it to [0, 1]. Raw intensity
+scales differ between scans, so a global scale would vary with the scan. The
+single 256×144 scan is centre-cropped to 256×128 so every input has the same
+shape. The grayscale value is kept as a single channel.
 
-### Figures
+### 4.4 Splits
 
-![Test reconstructions](figures/reconstruction.png)
+The splits come from the dataset provider and are kept patient-disjoint. Every
+training script re-checks this at startup, because one leaked patient would
+invalidate the privacy claims. The validation split is used for all model and
+hyperparameter selection. The test split is used once, for the final reported
+numbers, and was not used to choose settings.
 
-*Test-set reconstructions from the selected VQ-VAE (uncurated).*
+## 5. Experiments
 
-![Nearest-neighbour distances](figures/nn_distance_distributions.png)
+Experiments were run in order. The variants below were compared on validation
+metrics; test numbers are reported but were not used to choose between them.
 
-*Nearest-neighbour distance distributions for generated and real slices.*
+### 5.1 Baseline VQ-VAE and the codebook collapse
 
-![VQ-VAE + prior samples, seed 0](figures/vqvae_prior_seed0.png)
+The first model followed van den Oord et al. (2017): two 4×4 stride-2
+convolutions, two residual blocks, a 512-entry codebook of dimension 64,
+β = 0.25, Adam at 2×10⁻⁴, and width 128. In the 5-epoch smoke test it reached
+validation SSIM 0.624, but only 13 codes were used (perplexity 6.8). This
+codebook collapse is a known failure mode, and the campaign was designed to test
+whether longer training recovers code use.
 
-*Uncurated samples from the VQ-VAE + PixelCNN prior (fixed seed 0).*
+### 5.2 Longer training and reconstruction loss
 
-![DCGAN samples, seed 0](figures/dcgan_seed0.png)
+Training for 100 epochs raised code use to 199–338 of 512 on the test set,
+depending on seed and configuration. The L1 reconstruction variant was selected
+on validation SSIM (0.93164), against 0.93111 for the main configuration with
+seed 0. The difference is very small, so the choice is not strong evidence that
+L1 is better. It was made by the predeclared validation rule, not by test
+performance.
 
-*Uncurated samples from the DCGAN baseline (fixed seed 0).*
+### 5.3 Codebook and downsampling variants
 
-All numbers below come from the frozen 25-job campaign (`campaigns/oct26`),
-using the 540 held-out test slices (3 patients) unless stated otherwise.
+| Variant | Validation SSIM | Codes used (test) | Decision |
+|---|---:|---:|---|
+| Baseline (L1, 4× downsampling, 512 codes) | 0.9316 | 199 | **Selected** |
+| Data-based codebook initialisation | 0.9287 | 236 | Not selected |
+| 128 codes | 0.9184 | 128 | Not selected; lower perplexity (66) |
+| 8× downsampling (32×16 grid) | 0.7850 | 187 | Not selected; large loss of detail |
 
-**Reconstruction fidelity (SSIM, test).** The selected VQ-VAE (L1 loss, seed 0)
-reaches mean SSIM **0.9425**, with 540/540 reconstructions >= 0.6. Main-config
-seeds 0/1 give 0.9414 and 0.9432. Codebook use: 199/512 codes, perplexity 130.9.
+Eight-fold downsampling makes sampling about four times cheaper, but the
+reconstruction quality drops sharply, so it was rejected. Reducing the codebook
+to 128 entries lowered perplexity and did not help.
 
-**Generated-sample fidelity (supplementary SSIM).** The teaching team clarified
-that the SSIM > 0.6 target applies to reconstructions, so this comparison is
-supplementary. Each generated image is compared with its nearest held-out real
-slice by pixel L2. We ran the identical protocol on real scans to calibrate it
-(`real_control.py`, output `real_control.json`):
+### 5.4 Prior variants
 
-| Cohort (nearest-reference SSIM) | Mean | Median | Max | Fraction >= 0.6 |
-|---|---:|---:|---:|---:|
-| Real test scans (control) | 0.2504 | 0.2451 | 0.3417 | 0.000 |
-| VQ-VAE + PixelCNN prior (L1, seed 0) | 0.1827 | - | - | 0.000 |
-| DCGAN (seed 0) | 0.2154 | - | - | 0.000 |
+The PixelCNN prior was trained on the frozen selected VQ-VAE. The selected prior
+reached a validation NLL of 3.455 nats per code. Other prior variants ranged from
+2.924 to 3.602 nats; these are reported in `RESULTS.md`. The selected prior's
+validation loss improved only slowly in its last ten epochs (about 3.468 at
+epoch 30 and 3.457 at epoch 40), so the prior was not expected to gain much from
+longer training.
 
-**Interpretation.** Following the teaching-team clarification that the SSIM > 0.6
-target applies to test-set reconstructions (each test slice against its own
-reconstruction), the criterion is met: reconstruction SSIM is 0.9425. The
-unpaired generated-sample comparison is supplementary. Genuine patient scans
-only reach 0.25 under that protocol, so it cannot be used as the pass criterion;
-generated samples (0.18) sit just below that real-data band.
+### 5.5 DCGAN baseline
 
-**Distribution fidelity (KID, 1,500 samples per model, test set).**
+The first DCGAN produced banded samples, a known artefact of transposed
+convolutions (Odena et al., 2016). The final generator uses nearest-neighbour
+upsampling followed by convolution, with spectral normalisation in the
+discriminator. The baseline was trained for 50 epochs with two seeds.
 
-| Run | VQ-VAE + prior KID | DCGAN KID |
+### 5.6 What did not work
+
+- 8× downsampling: reconstructions lost too much detail (see 5.3).
+- 128 codes: lower perplexity and no gain in quality.
+- Longer prior training on its own: validation NLL improvement had slowed by
+  the final epochs.
+- The first DCGAN: banded samples. The upsampling change in 5.5 was made to
+  address this, but the fix has not yet been checked on a visual comparison.
+
+## 6. Results
+
+All numbers come from the frozen campaign. Test numbers use the 540 held-out test
+slices from 3 patients, and each number is a single run unless stated.
+
+### 6.1 Quantitative results
+
+**Reconstruction (test, SSIM).** The selected VQ-VAE reaches mean SSIM
+**0.9425**, with 540/540 reconstructions at or above 0.6. Seeds 0 and 1 of the
+main configuration give 0.9414 and 0.9432. The 0.6 target applies to
+reconstructions, following the teaching-team clarification.
+
+**Generation (unpaired SSIM, supplementary).** Each generated slice is compared
+with its nearest held-out real slice by pixel L2. The same protocol on real
+scans gives mean 0.2504, so this measure cannot reach 0.6 even for real data.
+
+| Cohort | Mean SSIM to nearest reference | Fraction ≥ 0.6 |
 |---|---:|---:|
-| Seed 0 | 0.4218 (L1) / 0.3734 (main) | 0.4890 |
+| Real test scans (control) | 0.2504 | 0.000 |
+| VQ-VAE + PixelCNN prior (selected) | 0.1827 | 0.000 |
+| DCGAN (seed 0) | 0.2154 | 0.000 |
+
+**Distribution fidelity (KID, 1,500 samples per model).**
+
+| Run | VQ-VAE + prior | DCGAN |
+|---|---:|---:|
+| Seed 0 | 0.4218 (selected) / 0.3734 (main) | 0.4890 |
 | Seed 1 | 0.4308 (main) | 0.2830 |
 
-Lower is better. The two seeds disagree in the baseline's favour on the second
-run, so **no consistent winner is claimed**. The K128 ablation scores 0.3478,
-but it is a test-set observation and was not used for selection.
+Lower is better. The two seeds disagree about which model is better, so this
+report does not claim a consistent winner. The K128 variant scored 0.3478 on the
+test set, but it was not chosen on test results.
 
-**Memorisation screen.** For every cohort, zero generated images exactly match
-a training slice after uint8 conversion, and all sampled images are unique.
-L1 has 3.9% of samples below the validation-calibrated nearest-neighbour
-threshold. This is a screening result, not a privacy guarantee.
-
-**Resource profile (A100-PCIE-40GB).**
+**Resources (A100-PCIE-40GB).**
 
 | Model | Epoch time (s) | Peak training VRAM (GB) | Time for 500 samples |
 |---|---:|---:|---:|
-| VQ-VAE (L1) | 8.21 | 1.03 | - |
-| PixelCNN prior (L1) | 7.85 | 0.68 | ~40 s |
-| DCGAN | 8.65 | 1.01 | ~0.08 s |
+| VQ-VAE (selected) | 8.21 | 1.03 | - |
+| PixelCNN prior (selected) | 7.85 | 0.68 | about 40 s |
+| DCGAN | 8.65 | 1.01 | about 0.08 s |
 
-Parameter counts were not recorded by the campaign, so they are not reported
-here. Total GPU allocation for the campaign was 3.03 hours (2.53 hours of
-training).
+The campaign did not record parameter counts. Preliminary parameter counts from
+the smoke tests were 1.18 M (VQ-VAE), 2.13 M (PixelCNN prior), and 3.2 M / 2.8 M
+(DCGAN generator / discriminator). Total GPU allocation was 3.03 hours, of which
+2.53 hours was training.
 
-**Summary.** Reconstruction is strong and the pipeline is reproducible. Generation
-quality is mixed: the prior is about 500x slower per sample than the DCGAN, its
-KID is not consistently better, and its unpaired-reference SSIM is only slightly
-below real data. These are the trade-offs carried into the manager recommendation.
+### 6.2 Qualitative results
 
-## Investigation of the open research dilemma
+![Test reconstructions](figures/reconstruction.png)
 
-**Baseline comparison.** Against the DCGAN baseline, the VQ-VAE + PixelCNN
-prior has no consistent advantage in distribution fidelity: KID is 0.42 (L1)
-and 0.37/0.43 across two VQ-VAE seeds, versus 0.49 and 0.28 for two DCGAN seeds.
-Reconstruction is strong (SSIM 0.94), but reconstruction does not measure novel
-generation. The DCGAN is roughly 500x faster per sample (0.08 s vs ~40 s per 500).
+*Test-set reconstructions from the selected VQ-VAE, uncurated.*
 
-**Memorisation and privacy.** No generated image is an exact copy of a training
-slice. Some generated samples do fall below the validation-calibrated
-nearest-neighbour threshold (3.9% for the selected prior; 13.2% at the lower
-sampling temperature), so proximity to training scans is a real trade-off and
-not absent. This is evidence against verbatim copying in these runs.
-It is not a privacy guarantee: nearest-neighbour checks cannot rule out
-near-copies or attribute leakage, and no formal differential-privacy bound
-was applied.
+![VQ-VAE + prior samples, seed 0](figures/vqvae_prior_seed0.png)
 
-**Failure autopsies (3-5 cases).** *To be completed after visual review of
-`failure_candidates` and `worst_reconstructions` figures. Each case should name
-the observed artefact (e.g. boundary blurring, implausible tissue junction,
-mode repetition), the likely trigger, and whether it is a reconstruction or a
-prior-sampling failure.*
+*Uncurated samples from the VQ-VAE + PixelCNN prior, fixed seed 0.*
 
-**Engineering recommendation for the project manager.** For reconstruction-based
-downstream tasks, the VQ-VAE is suitable under the reported fidelity. For
-unconditional synthetic cohorts, neither model is yet clinically validated:
-the prior's samples are slower to produce and do not clearly beat the DCGAN on
-KID. We recommend (1) human expert review of generated samples before any
-downstream use, (2) treating the memorisation screen as a screen only, and (3)
-evaluating FID and a larger held-out cohort before sharing any synthetic data.
+![DCGAN samples, seed 0](figures/dcgan_seed0.png)
 
-## Artificial Intelligence Usage Disclosure
+*Uncurated samples from the DCGAN baseline, fixed seed 0.*
+
+![Nearest-neighbour distances](figures/nn_distance_distributions.png)
+
+*Distances from generated and real slices to their nearest training slices.*
+
+**[TODO] Side-by-side comparison.** Each model's samples next to real slices,
+with written observations on structure, tissue boundaries and diversity.
+
+**[TODO] Closest training pairs.** Generated samples next to their nearest
+training slices, to show whether they are distinct.
+
+### 6.3 Memorisation screen
+
+No generated slice exactly matches a training slice after uint8 conversion, and
+all sampled slices are unique. For the selected prior, 3.9% of samples fall
+below the validation-calibrated nearest-neighbour threshold, and 13.2% do at
+lower sampling temperature. This is evidence against verbatim copying in these
+runs. It is not a privacy guarantee, and it cannot rule out near-copies.
+
+### 6.4 Failure autopsies
+
+**[TODO] Three to five failure cases**, selected from the failure-candidate
+figures and reviewed by the student. Each should name the artefact observed,
+the likely trigger, and whether it is a reconstruction or a sampling failure.
+
+## 7. Limitations
+
+- Unpaired generated-slice SSIM cannot reach 0.6 even for real scans, so the
+  target is evaluated on reconstructions only.
+- Patient numbers are small (3 test patients, 4 validation patients), so
+  per-patient variation is large.
+- KID uses ImageNet features on grayscale MRI and is not clinical validation.
+- Nearest-neighbour screening does not prove the absence of memorisation.
+- No formal differential-privacy bound was applied.
+- Parameter counts were not recorded.
+
+## 8. Recommendation for the project manager
+
+For reconstruction-based downstream use, the VQ-VAE meets the fidelity target.
+For unconditional synthetic cohorts, neither model is validated: the prior is
+about 500 times slower per sample than the DCGAN and is not clearly better on
+KID. Before any synthetic data is shared, we recommend expert review of samples,
+treating the memorisation screen as a screen only, and evaluating FID and a
+larger held-out cohort.
+
+## 9. Dependencies and reproducibility
+
+- Python 3.11, torch 2.13.0+cu130, torchvision 0.28.0+cu130,
+  torchmetrics 1.9.0, torch-fidelity 0.4.0, nibabel 5.4.2,
+  scikit-image 0.26.0, matplotlib 3.11.2, tqdm 4.70.0, NumPy.
+- KID requires torch-fidelity and Inception weights, cached outside Git.
+- Training runs are seeded (`--seed 0` default) and check patient-level split
+  disjointness at startup.
+- Operational instructions for running experiments are in `RUNNING.md`.
+
+Local tests: `python -m unittest discover -p 'test_*.py' -v`.
+
+## 10. Artificial Intelligence Usage Disclosure
 
 **Tools used:** DeepSeek (agentic coding assistant) and Claude (analysis and
 report drafting). The design decisions, experiment selection and final
@@ -336,15 +303,17 @@ rather than taken from generated text. The real-to-real SSIM control was run
 to test the metric's interpretation. [Author to confirm which code was read
 line by line and which parts were tested only.]
 
-## References
+## 11. References
 
-- van den Oord, A., Vinyals, O. &amp; Kavukcuoglu, K. (2017). Neural Discrete
+- van den Oord, A., Vinyals, O. & Kavukcuoglu, K. (2017). Neural Discrete
   Representation Learning. NeurIPS.
 - van den Oord, A., et al. (2016). Conditional Image Generation with PixelCNN
   Decoders. NeurIPS.
-- Radford, A., Metz, L. &amp; Chintala, S. (2016). Unsupervised Representation
+- Radford, A., Metz, L. & Chintala, S. (2016). Unsupervised Representation
   Learning with Deep Convolutional GANs. ICLR.
-- Odena, A., Dumoulin, V. &amp; Olah, C. (2016). Deconvolution and Checkerboard
+- Odena, A., Dumoulin, V. & Olah, C. (2016). Deconvolution and Checkerboard
   Artifacts. Distill.
 - Miyato, T., et al. (2018). Spectral Normalization for GANs. ICLR.
 - Binkowski, M., et al. (2018). Demystifying MMD GANs (KID). ICLR.
+- Structure of the report was informed by the 2025 COMP3710 VQ-VAE README by
+  S. Subramaniam (PatternAnalysis-2025, s4858817_VQVAE). No text was copied.
