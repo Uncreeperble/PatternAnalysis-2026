@@ -242,8 +242,16 @@ training slices, to show whether they are distinct.
 No generated slice exactly matches a training slice after uint8 conversion, and
 all sampled slices are unique. For the selected prior, 3.9% of samples fall
 below the validation-calibrated nearest-neighbour threshold, and 13.2% do at
-lower sampling temperature. This is evidence against verbatim copying in these
-runs. It is not a privacy guarantee, and it cannot rule out near-copies.
+lower sampling temperature.
+
+**Caveat found in the review.** Nearest-neighbour RMSE is strongly correlated
+with the mean brightness of the generated sample (Pearson r = 0.84 across all
+1,500 samples). Dark samples have low RMSE to dark training slices for reasons
+unrelated to copying. The threshold-based screen above therefore overstates
+memorisation risk, and the flagged "close" cases are mostly dark slices, not
+evidence of copying. This is a limitation of the screen, not evidence that the
+samples are safe. It is not a privacy guarantee, and it cannot rule out
+near-copies.
 
 ### 6.4 Failure autopsies
 
@@ -263,6 +271,21 @@ Observation to check: two of the four cases (A and B) have their nearest
 training slice from patient 019, the scan that was cropped from 256×144. This may be
 a coincidence, or the cropped scan may be over-represented in the training data.
 It needs checking before any claim is made.
+
+**Brightness check (Case B).** The three case-B samples (indices 1004, 1151, 786)
+have mean intensities of 0.091, 0.073 and 0.115, against a median of 0.150 across
+all samples. They are in the dark tail, which explains their low nearest-training
+RMSE (see section 6.3).
+
+**Author's visual review of the grids.** Case A and C grids show each generated
+sample next to its nearest training slice: the generated samples look unrealistic
+and the training slices look like hips. Case B's generated samples are dark and
+do not look like hips. Case D (patient 042, lowest reconstruction SSIM) still
+looks like a hip with more fine detail than typical. The uncurated fixed-seed
+grid (`vqvae_prior_seed0.png`) was reviewed by the author, who found that none of
+its samples look like hip anatomy. This means generation fails on typical
+samples, not only on the outlier cases selected above. Reconstruction, by
+contrast, looks like hip anatomy to the author.
 
 ## 7. Limitations
 
