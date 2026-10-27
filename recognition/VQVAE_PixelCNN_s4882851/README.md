@@ -206,6 +206,24 @@ if the prior cannot be completed.
 
 ## Results
 
+### Figures
+
+![Test reconstructions](figures/reconstruction.png)
+
+*Test-set reconstructions from the selected VQ-VAE (uncurated).*
+
+![Nearest-neighbour distances](figures/nn_distance_distributions.png)
+
+*Nearest-neighbour distance distributions for generated and real slices.*
+
+![VQ-VAE + prior samples, seed 0](figures/vqvae_prior_seed0.png)
+
+*Uncurated samples from the VQ-VAE + PixelCNN prior (fixed seed 0).*
+
+![DCGAN samples, seed 0](figures/dcgan_seed0.png)
+
+*Uncurated samples from the DCGAN baseline (fixed seed 0).*
+
 All numbers below come from the frozen 25-job campaign (`campaigns/oct26`),
 using the 540 held-out test slices (3 patients) unless stated otherwise.
 
