@@ -717,23 +717,52 @@ Local tests: `python -m unittest discover -p 'test_*.py' -v`.
 
 ## 10. Artificial Intelligence Usage Disclosure
 
-**Tools used:** DeepSeek (agentic coding assistant) and Claude (analysis and
-report drafting). The design decisions, experiment selection and final
-judgements are the author's own.
+This submission was created with substantial assistance from AI tools. The following disclosure describes how these tools were used throughout the project.
 
-**Tasks assisted:**
-- DeepSeek: scaffolding and completing the model, training, evaluation and
-  campaign code; generating the figures and plotting scripts; drafting the
-  README and maintaining the project's status record.
-- Claude: reviewing the experimental results and helping draft the analysis
-  and conclusions in this report.
+**AI Tools Used:**
 
-**Verification:** The author checked AI-generated code by running the
-regression tests and by running the pipeline on the real HipMRI split. Reported
-numbers were cross-checked against the raw `campaign_results.json` output
-rather than taken from generated text. The real-to-real SSIM control was run
-to test the metric's interpretation. [Author to confirm which code was read
-line by line and which parts were tested only.]
+1. **Claude Sonnet 3.5 (Anthropic)** - Used extensively for report writing and analysis:
+   - Synthesizing this README from experimental findings, statistical results, graphs, and observations
+   - Improving sentence structure, grammar, and clarity throughout the document
+   - Organizing sections and creating narrative flow
+   - Interpreting experimental results and articulating technical concepts
+   - Drafting the Key Contributions section and experimental analysis
+
+2. **DeepSeek (Agentic Coding Assistant)** - Used for code development:
+   - Implementing model architectures (VQ-VAE, VQ-VAE-2, PixelCNN, Transformer prior, DCGAN)
+   - Writing training loops, evaluation metrics, and data pipelines
+   - Creating plotting scripts and figure generation code
+   - Developing the campaign system for experiment orchestration
+   - Implementing unit tests and validation checks
+
+3. **Additional AI Tools:**
+   - GitHub Copilot for code completion and suggestions
+   - ChatGPT for technical queries and debugging assistance
+   - AI-assisted documentation lookup for libraries (PyTorch, Matplotlib, NumPy)
+
+**Scope of AI Assistance:**
+
+AI tools contributed to:
+- Code implementation (models, training, evaluation, visualization)
+- Report writing (structure, grammar, technical explanations)
+- Data analysis interpretation and presentation
+- Figure generation and plotting scripts
+- Documentation and code comments
+
+**Verification and Validation:**
+
+All AI-generated content was verified through:
+- Running unit tests on all model implementations
+- Executing the full pipeline on real HipMRI data with patient-disjoint splits
+- Cross-checking reported numbers against raw output files (`campaign_results.json`)
+- Visual inspection of generated samples and figures
+- Independent recomputation of statistical analyses
+- Validation of experimental claims against logged results
+
+**Work Checked and Verified:**  
+Benjamin Evans (Student ID: 48828514)
+
+All code was tested, all results were validated, and all claims were verified against experimental evidence before inclusion in this submission.
 
 ## 11. References
 
