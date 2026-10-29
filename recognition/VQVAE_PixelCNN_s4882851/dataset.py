@@ -136,3 +136,85 @@ class HipMRISlices(Dataset):
         if self.flip_p > 0 and torch.rand(1).item() < self.flip_p:
             img = torch.flip(img, dims=[-1])
         return img
+
+# --------------------------------------------------------------------------- #
+# Segmentation masks (exploratory: used to condition the prior on anatomy)
+# --------------------------------------------------------------------------- #
+MASK_CLASSES = 6  # label values 0..5 in keras_slices_seg_*
+
+# Masks mirror the images but use a seg_ prefix:
+#   images  case_004_week_0_slice_0.nii.gz
+#   masks    seg_004_week_0_slice_0.nii.gz
+# so they need their own key; _slice_key would not match and would raise.
+_MASK_RE = re.compile(r"seg_(\d+)_week_(\d+)_slice_(\d+)")
+
+
+def _mask_key(path):
+    """Sort key for mask files, by (case, week, slice), matching _slice_key."""
+    m = _MASK_RE.search(os.path.basename(path))
+    return tuple(int(g) for g in m.groups())
+
+
+def list_mask_split(root, split):
+    """Sorted mask paths for one split (keras_slices_seg_<split>)."""
+    files = sorted(glob.glob(os.path.join(root, f"keras_slices_seg_{split}", "*.nii.gz")),
+                   key=_mask_key)
+
+    if not files:
+        raise FileNotFoundError(f"no masks found for split '{split}' under {root}")
+    return files
+
+
+def load_mask(path):
+    """Load one label slice as int64 (256, 128), same crop rule as load_slice."""
+    arr = nib.load(path).get_fdata(caching="unchanged")
+    if arr.ndim == 3:
+        arr = arr[:, :, 0]
+    if arr.shape == (ROWS, 144):
+        arr = arr[:, 8:136]
+    if arr.shape != (ROWS, COLS):
+        raise ValueError(f"unexpected mask shape {arr.shape}: {path}")
+    return np.rint(arr).astype(np.int64)
+
+
+class HipMRIMasks(Dataset):
+    """Label masks for one split, aligned with HipMRISlices by sorted filename.
+
+    Returns one-hot masks [MASK_CLASSES, 256, 128] as float32 so they can be fed
+    straight into the conditioning path of CondPixelCNNPrior.
+    """
+
+    def __init__(self, root=DEFAULT_ROOT, split="train", preload=True, limit=0,
+                 one_hot=True):
+        assert split in SPLITS, f"unknown split '{split}'"
+        self.paths = list_mask_split(root, split)
+        if limit:
+            self.paths = self.paths[:limit]
+        self.one_hot = one_hot
+        self._cache = None
+        if preload:
+            batch = np.empty((len(self.paths), ROWS, COLS), dtype=np.int64)
+            for i, path in enumerate(tqdm(self.paths, desc=f"loading {split} masks",
+                                          unit="slice", mininterval=10)):
+                batch[i] = load_mask(path)
+            self._cache = torch.from_numpy(batch)  # [N,256,128] int64
+
+    def __len__(self):
+        return len(self.paths)
+
+    def __getitem__(self, idx):
+        m = (self._cache[idx] if self._cache is not None
+             else torch.from_numpy(load_mask(self.paths[idx])))
+        if not self.one_hot:
+            return m
+        return torch.nn.functional.one_hot(m.clamp(0, MASK_CLASSES - 1),
+                                           MASK_CLASSES).permute(2, 0, 1).float()
+
+
+def verify_image_mask_alignment(root, split):
+    """Check image and mask filenames correspond one-to-one by (case, week, slice)."""
+    imgs = [_slice_key(p) for p in list_split(root, split)]
+    masks = [_mask_key(p) for p in list_mask_split(root, split)]
+
+    assert imgs == masks, f"image/mask ordering mismatch in split '{split}'"
+    return {"split": split, "n": len(imgs)}

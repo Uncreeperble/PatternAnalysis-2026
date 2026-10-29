@@ -21,8 +21,10 @@ import torch
 import torch.nn.functional as F
 from skimage.metrics import structural_similarity as ssim
 
-from dataset import DEFAULT_ROOT, HipMRISlices, verify_patient_splits
-from modules import VQVAE, PixelCNNPrior, DCGenerator, DCDiscriminator
+from dataset import (DEFAULT_ROOT, MASK_CLASSES, HipMRISlices, list_mask_split,
+                     load_mask, verify_image_mask_alignment, verify_patient_splits)
+from modules import (VQVAE, CondPixelCNNPrior, GatedPixelCNNPrior, PixelCNNPrior,
+                     TransformerPrior, DCGenerator, DCDiscriminator)
 from runtime import (atomic_json, atomic_save, checkpoint_epoch, device_for,
                      finite_loss, load_model, log, progress, restore, sha256, start_run)
 
@@ -45,6 +47,17 @@ def parse_args():
     p.add_argument("--prior-blocks", type=int, default=4)
     p.add_argument("--prior-kernel", type=int, choices=(3, 7), default=3)
     p.add_argument("--prior-embedding", type=int, default=32)
+    p.add_argument("--prior-type",
+                   choices=("pixelcnn", "transformer", "cond", "gated", "gated-cond"),
+                   default="pixelcnn")
+    p.add_argument("--prior-layers", type=int, default=22,
+                   help="gated prior only: number of gated layers. The vertical "
+                        "receptive field is layers*(kernel//2) rows, which must "
+                        "reach the code-grid height or the prior cannot place "
+                        "anatomy globally.")
+    p.add_argument("--prior-heads", type=int, default=8, help="transformer prior only")
+    p.add_argument("--weight-decay", type=float, default=0.0,
+                   help="Adam L2 weight decay for the prior (0 = unchanged campaign behaviour)")
     p.add_argument("--noise-dim", type=int, default=100)
     p.add_argument("--gan-width", type=int, default=256)
     p.add_argument("--disc-width", type=int, default=64)
@@ -81,6 +94,36 @@ def encode_split(vqvae, data, batch_size, device):
     vqvae.eval()
     return torch.cat([vqvae.encode_to_codes(x.to(device)).cpu()
                       for x in progress(torch.split(data._cache, batch_size), "encoding")])
+
+
+def code_grid_masks(root, split, grid_hw, limit=0):
+    """Label masks downsampled to the code grid, as uint8 [N, h, w].
+
+    Nearest-neighbour by exact striding (256/64 = 4, 128/32 = 4), which keeps
+    label values intact; averaging would invent classes that do not exist.
+
+    Each mask is strided as it is read rather than preloading the split through
+    HipMRIMasks: the full-resolution int64 train cache would be ~3 GB purely to
+    be downsampled immediately. The result here is ~22 MB as uint8, expanded to
+    one-hot per batch.
+    """
+    paths = list_mask_split(root, split)
+    if limit:
+        paths = paths[:limit]
+    h, w = grid_hw
+    out = torch.empty(len(paths), h, w, dtype=torch.uint8)
+    for i, path in enumerate(progress(paths, f"loading {split} masks")):
+        arr = load_mask(path)
+        sh, sw = arr.shape[0] // h, arr.shape[1] // w
+        if sh * h != arr.shape[0] or sw * w != arr.shape[1]:
+            raise ValueError(f"mask shape {arr.shape} not divisible by grid {grid_hw}")
+        out[i] = torch.from_numpy(arr[::sh, ::sw]).clamp(0, MASK_CLASSES - 1).to(torch.uint8)
+    return out
+
+
+def one_hot_masks(batch, device):
+    """uint8 [B, h, w] label grid -> float one-hot [B, MASK_CLASSES, h, w]."""
+    return F.one_hot(batch.to(device).long(), MASK_CLASSES).permute(0, 3, 1, 2).float()
 
 
 def save_plots(history, out_dir):
@@ -178,33 +221,87 @@ def train_prior(args, device, vqvae):
     train_codes = encode_split(vqvae, train, args.batch_size, device)
     val_codes = encode_split(vqvae, val, args.batch_size, device)
     del train, val, vqvae
-    model = PixelCNNPrior(num_codes=args.num_codes, width=args.prior_width,
+    grid_hw = tuple(train_codes.shape[1:])
+    train_masks = val_masks = None
+    conditional = args.prior_type in ("cond", "gated-cond")
+    if conditional:
+        # Conditioning on the segmentation labels targets anatomical layout,
+        # which the unconditional prior loses: each code position only sees
+        # row_radius rows above it, so it cannot place the hip globally.
+        log(f"image/mask alignment: {verify_image_mask_alignment(args.data_root, 'train')} "
+            f"{verify_image_mask_alignment(args.data_root, 'validate')}")
+        train_masks = code_grid_masks(args.data_root, "train", grid_hw, args.limit)
+        val_masks = code_grid_masks(args.data_root, "validate", grid_hw,
+                                    max(1, args.limit // 4) if args.limit else 0)
+        if len(train_masks) != len(train_codes) or len(val_masks) != len(val_codes):
+            raise ValueError("code/mask counts differ; refusing to train on misaligned pairs")
+    if args.prior_type in ("gated", "gated-cond"):
+        model = GatedPixelCNNPrior(num_codes=args.num_codes, width=args.prior_width,
+                                   num_layers=args.prior_layers,
+                                   embedding_dim=args.prior_embedding,
+                                   kernel_size=args.prior_kernel,
+                                   mask_classes=MASK_CLASSES if conditional else 0,
+                                   grid_hw=grid_hw).to(device)
+        # Refuse to train a prior that structurally cannot see the whole grid:
+        # that is the defect this model exists to fix, so it must be checked.
+        if not model.covers_grid():
+            raise ValueError(
+                f"gated prior receptive field {model.vertical_receptive_field} rows "
+                f"< grid height {grid_hw[0]}; increase --prior-layers or --prior-kernel")
+        log(f"gated prior: {args.prior_layers} layers, kernel {args.prior_kernel}, "
+            f"vertical receptive field {model.vertical_receptive_field} rows "
+            f">= grid height {grid_hw[0]}")
+    elif args.prior_type == "cond":
+        model = CondPixelCNNPrior(num_codes=args.num_codes, width=args.prior_width,
+                                  num_blocks=args.prior_blocks,
+                                  embedding_dim=args.prior_embedding,
+                                  kernel_size=args.prior_kernel,
+                                  mask_classes=MASK_CLASSES, grid_hw=grid_hw).to(device)
+    elif args.prior_type == "transformer":
+        model = TransformerPrior(num_codes=args.num_codes, width=args.prior_width,
+                                 num_layers=args.prior_blocks, num_heads=args.prior_heads,
+                                 grid_hw=grid_hw).to(device)
+    else:
+        model = PixelCNNPrior(num_codes=args.num_codes, width=args.prior_width,
                           num_blocks=args.prior_blocks, embedding_dim=args.prior_embedding,
                           kernel_size=args.prior_kernel,
-                          grid_hw=tuple(train_codes.shape[1:])).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+                          grid_hw=grid_hw).to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     models, opts = {"prior": model}, {"prior": opt}
     epoch0, history, best = restore(args, models, opts, device)
     history = history or {k: [] for k in ("train_nll", "val_nll", "epoch_seconds")}
-    loader = torch.utils.data.DataLoader(train_codes, batch_size=args.batch_size, shuffle=True)
+    # One dataset of (codes, mask) pairs, so shuffling can never separate them.
+    train_set = (torch.utils.data.TensorDataset(train_codes, train_masks)
+                 if train_masks is not None else train_codes)
+    loader = torch.utils.data.DataLoader(train_set, batch_size=args.batch_size, shuffle=True)
+    val_batches = (list(zip(torch.split(val_codes, args.batch_size),
+                            torch.split(val_masks, args.batch_size)))
+                   if val_masks is not None else torch.split(val_codes, args.batch_size))
+
+    def batch_loss(batch):
+        if train_masks is None:
+            return model.loss(batch.to(device)), len(batch)
+        codes, mask = batch
+        return model.loss(codes.to(device), one_hot_masks(mask, device)), len(codes)
+
     for epoch in range(epoch0 + 1, args.epochs + 1):
         start = time.monotonic()
         model.train()
         total = 0.0
-        for codes in progress(loader, f"prior epoch {epoch}/{args.epochs}"):
-            loss = model.loss(codes.to(device))
+        for batch in progress(loader, f"prior epoch {epoch}/{args.epochs}"):
+            loss, n = batch_loss(batch)
             finite_loss(loss)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
-            total += loss.item() * len(codes)
+            total += loss.item() * n
         model.eval()
         val_total = 0.0
         with torch.no_grad():
-            for codes in progress(torch.split(val_codes, args.batch_size), "validation NLL"):
-                loss = model.loss(codes.to(device))
+            for batch in progress(val_batches, "validation NLL"):
+                loss, n = batch_loss(batch)
                 finite_loss(loss)
-                val_total += loss.item() * len(codes)
+                val_total += loss.item() * n
         score = val_total / len(val_codes)  # weighted, including the short last batch
         history["train_nll"].append(total / len(train_codes))
         history["val_nll"].append(score)

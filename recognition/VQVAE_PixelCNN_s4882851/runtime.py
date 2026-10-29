@@ -11,7 +11,8 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from modules import VQVAE, PixelCNNPrior, DCGenerator
+from modules import (VQVAE, CondPixelCNNPrior, GatedPixelCNNPrior, PixelCNNPrior,
+                     TransformerPrior, DCGenerator)
 
 
 def log(message):
@@ -148,6 +149,26 @@ def load_model(path, kind, device):
         model = VQVAE(width=config["width"], latent_dim=config["latent_dim"],
                       num_codes=config["num_codes"], beta=config["beta"],
                       downsample=config.get("downsample", 4))
+    elif kind == "prior" and config.get("prior_type", "pixelcnn") in ("gated", "gated-cond"):
+        mask_classes = 0
+        if config["prior_type"] == "gated-cond":
+            from dataset import MASK_CLASSES
+            mask_classes = MASK_CLASSES
+        model = GatedPixelCNNPrior(num_codes=config["num_codes"], width=config["prior_width"],
+                                   num_layers=config["prior_layers"],
+                                   kernel_size=config["prior_kernel"],
+                                   embedding_dim=config["prior_embedding"],
+                                   mask_classes=mask_classes)
+    elif kind == "prior" and config.get("prior_type", "pixelcnn") == "cond":
+        from dataset import MASK_CLASSES
+        model = CondPixelCNNPrior(num_codes=config["num_codes"], width=config["prior_width"],
+                                  num_blocks=config["prior_blocks"],
+                                  kernel_size=config["prior_kernel"],
+                                  embedding_dim=config["prior_embedding"],
+                                  mask_classes=MASK_CLASSES)
+    elif kind == "prior" and config.get("prior_type", "pixelcnn") == "transformer":
+        model = TransformerPrior(num_codes=config["num_codes"], width=config["prior_width"],
+                                 num_layers=config["prior_blocks"], num_heads=config["prior_heads"])
     elif kind == "prior":
         model = PixelCNNPrior(num_codes=config["num_codes"], width=config["prior_width"],
                               num_blocks=config["prior_blocks"],

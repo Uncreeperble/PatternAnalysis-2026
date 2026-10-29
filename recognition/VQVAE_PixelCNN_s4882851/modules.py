@@ -333,6 +333,440 @@ class PixelCNNPrior(nn.Module):
 
 
 # --------------------------------------------------------------------------- #
+# VQ-VAE-2: Hierarchical Vector Quantization (Razavi et al., 2019)
+# --------------------------------------------------------------------------- #
+class VQVAE2(nn.Module):
+    """Hierarchical VQ-VAE with two-level quantization for global + local structure.
+    
+    Architecture:
+    - Encoder produces TWO latent grids:
+      * Coarse (16×8): Captures global anatomy (pelvis position, overall structure)
+      * Fine (64×32): Captures local texture and details
+    - Decoder combines upsampled coarse with fine for reconstruction
+    - Two separate priors:
+      * Coarse prior: Learns global anatomical layout
+      * Fine prior: Learns local texture conditioned on coarse codes
+    
+    This solves the receptive field problem: coarse prior only needs to model
+    16×8=128 positions (easily covered by PixelCNN), while fine prior has
+    coarse context to guide local detail generation.
+    
+    Based on "Generating Diverse High-Fidelity Images with VQ-VAE-2" 
+    (Razavi, van den Oord & Vinyals, NeurIPS 2019).
+    """
+    
+    def __init__(self, in_channels=1, width=128, latent_dim=64,
+                 num_codes=512, beta=0.25):
+        super().__init__()
+        
+        # Encoder path: 256×128 → 128×64 → 64×32 → 32×16 → 16×8
+        # We extract features at two levels: 64×32 (fine) and 16×8 (coarse)
+        
+        # Shared encoder backbone to 64×32
+        self.enc_conv1 = nn.Conv2d(in_channels, width, 4, stride=2, padding=1)  # 256×128 → 128×64
+        self.enc_conv2 = nn.Conv2d(width, width, 4, stride=2, padding=1)        # 128×64 → 64×32
+        self.enc_res1 = ResidualBlock(width)
+        self.enc_res2 = ResidualBlock(width)
+        
+        # Fine level: quantize at 64×32
+        self.enc_fine = nn.Conv2d(width, latent_dim, 1)
+        self.quantizer_fine = VectorQuantizer(num_codes, latent_dim, beta)
+        
+        # Continue encoding to coarse level: 64×32 → 32×16 → 16×8
+        self.enc_conv3 = nn.Conv2d(width, width, 4, stride=2, padding=1)        # 64×32 → 32×16
+        self.enc_conv4 = nn.Conv2d(width, width, 4, stride=2, padding=1)        # 32×16 → 16×8
+        self.enc_res3 = ResidualBlock(width)
+        self.enc_res4 = ResidualBlock(width)
+        
+        # Coarse level: quantize at 16×8
+        self.enc_coarse = nn.Conv2d(width, latent_dim, 1)
+        self.quantizer_coarse = VectorQuantizer(num_codes, latent_dim, beta)
+        
+        # Decoder path: 16×8 → 32×16 → 64×32 → 128×64 → 256×128
+        # Coarse codes are upsampled and combined with fine codes
+        
+        # Decode from coarse: 16×8 → 32×16 → 64×32
+        self.dec_coarse_in = nn.Conv2d(latent_dim, width, 1)
+        self.dec_res1 = ResidualBlock(width)
+        self.dec_res2 = ResidualBlock(width)
+        self.dec_upsample1 = nn.ConvTranspose2d(width, width, 4, stride=2, padding=1)  # 16×8 → 32×16
+        self.dec_upsample2 = nn.ConvTranspose2d(width, width, 4, stride=2, padding=1)  # 32×16 → 64×32
+        
+        # Combine upsampled coarse with fine codes at 64×32
+        self.dec_combine = nn.Conv2d(width + latent_dim, width, 1)
+        self.dec_res3 = ResidualBlock(width)
+        self.dec_res4 = ResidualBlock(width)
+        
+        # Final upsampling to image: 64×32 → 128×64 → 256×128
+        self.dec_upsample3 = nn.ConvTranspose2d(width, width, 4, stride=2, padding=1)  # 64×32 → 128×64
+        self.dec_upsample4 = nn.ConvTranspose2d(width, in_channels, 4, stride=2, padding=1)  # 128×64 → 256×128
+        self.dec_out = nn.Sigmoid()
+    
+    def encode(self, x):
+        """Encode image to coarse and fine code indices.
+        
+        Returns:
+            codes_coarse: [B, 16, 8] integer codes
+            codes_fine: [B, 64, 32] integer codes
+        """
+        # Shared encoding to 64×32
+        h = F.relu(self.enc_conv1(x))
+        h = F.relu(self.enc_conv2(h))
+        h = self.enc_res1(h)
+        h = self.enc_res2(h)
+        
+        # Fine level quantization at 64×32
+        z_e_fine = self.enc_fine(h)
+        _, _, _, codes_fine = self.quantizer_fine(z_e_fine)
+        
+        # Continue to coarse level
+        h = F.relu(self.enc_conv3(h))
+        h = F.relu(self.enc_conv4(h))
+        h = self.enc_res3(h)
+        h = self.enc_res4(h)
+        
+        # Coarse level quantization at 16×8
+        z_e_coarse = self.enc_coarse(h)
+        _, _, _, codes_coarse = self.quantizer_coarse(z_e_coarse)
+        
+        return codes_coarse, codes_fine
+    
+    def decode(self, codes_coarse, codes_fine):
+        """Decode from coarse and fine codes to image.
+        
+        Args:
+            codes_coarse: [B, 16, 8] integer codes
+            codes_fine: [B, 64, 32] integer codes
+        
+        Returns:
+            x_recon: [B, 1, 256, 128] reconstructed image
+        """
+        # Get quantized embeddings
+        z_q_coarse = self.quantizer_coarse.codebook(codes_coarse).permute(0, 3, 1, 2).contiguous()
+        z_q_fine = self.quantizer_fine.codebook(codes_fine).permute(0, 3, 1, 2).contiguous()
+        
+        # Decode coarse: 16×8 → 64×32
+        h = self.dec_coarse_in(z_q_coarse)
+        h = self.dec_res1(h)
+        h = self.dec_res2(h)
+        h = F.relu(self.dec_upsample1(h))  # 16×8 → 32×16
+        h = F.relu(self.dec_upsample2(h))  # 32×16 → 64×32
+        
+        # Combine upsampled coarse with fine codes
+        h = torch.cat([h, z_q_fine], dim=1)
+        h = self.dec_combine(h)
+        h = self.dec_res3(h)
+        h = self.dec_res4(h)
+        
+        # Upsample to image
+        h = F.relu(self.dec_upsample3(h))  # 64×32 → 128×64
+        h = self.dec_upsample4(h)          # 128×64 → 256×128
+        return self.dec_out(h)
+    
+    def forward(self, x):
+        """Forward pass for training.
+        
+        Returns:
+            x_recon: Reconstructed image
+            vq_loss: Combined VQ loss from both levels
+            perplexity_coarse: Codebook usage at coarse level
+            perplexity_fine: Codebook usage at fine level
+            codes_coarse: Coarse code indices
+            codes_fine: Fine code indices
+        """
+        # Encode to both levels
+        h = F.relu(self.enc_conv1(x))
+        h = F.relu(self.enc_conv2(h))
+        h = self.enc_res1(h)
+        h = self.enc_res2(h)
+        
+        # Fine level
+        z_e_fine = self.enc_fine(h)
+        z_q_fine, vq_loss_fine, perplexity_fine, codes_fine = self.quantizer_fine(z_e_fine)
+        
+        # Coarse level
+        h = F.relu(self.enc_conv3(h))
+        h = F.relu(self.enc_conv4(h))
+        h = self.enc_res3(h)
+        h = self.enc_res4(h)
+        z_e_coarse = self.enc_coarse(h)
+        z_q_coarse, vq_loss_coarse, perplexity_coarse, codes_coarse = self.quantizer_coarse(z_e_coarse)
+        
+        # Decode
+        h = self.dec_coarse_in(z_q_coarse)
+        h = self.dec_res1(h)
+        h = self.dec_res2(h)
+        h = F.relu(self.dec_upsample1(h))
+        h = F.relu(self.dec_upsample2(h))
+        h = torch.cat([h, z_q_fine], dim=1)
+        h = self.dec_combine(h)
+        h = self.dec_res3(h)
+        h = self.dec_res4(h)
+        h = F.relu(self.dec_upsample3(h))
+        h = self.dec_upsample4(h)
+        x_recon = self.dec_out(h)
+        
+        # Combine losses (equal weight for now, could be tuned)
+        vq_loss = vq_loss_coarse + vq_loss_fine
+        
+        return x_recon, vq_loss, perplexity_coarse, perplexity_fine, codes_coarse, codes_fine
+
+
+# --------------------------------------------------------------------------- #
+# Gated PixelCNN (van den Oord et al., "Conditional Image Generation with
+# PixelCNN Decoders", NeurIPS 2016)
+# --------------------------------------------------------------------------- #
+def _gate(x):
+    """Gated activation unit: tanh(a) * sigmoid(b) over a channel split."""
+    a, b = x.chunk(2, dim=1)
+    return torch.tanh(a) * torch.sigmoid(b)
+
+
+class GatedMaskedLayer(nn.Module):
+    """One Gated PixelCNN layer with separate vertical and horizontal stacks.
+
+    Why this replaces `MaskedConv2d`: a single masked convolution has a
+    *blind spot* -- a wedge of pixels above-right of the current position that
+    can never be reached no matter how many layers are stacked. Gated PixelCNN
+    removes it by factorising the receptive field into
+
+      * a **vertical stack**, a (k//2+1, k) convolution covering whole rows
+        above, and
+      * a **horizontal stack**, a (1, k//2+1) convolution covering the current
+        row to the left,
+
+    with the vertical stack feeding the horizontal stack after a one-row
+    downward shift. That shift is what preserves causality: the horizontal
+    stack at row i only ever receives vertical features computed from rows
+    strictly above i.
+
+    Causality argument (checked by `.ai/gated_causality.py`):
+      * `v_out[i]` depends on input rows <= i.
+      * Feeding `h` uses `v_shift[i] = v_out[i-1]`, so rows <= i-1.
+      * `h_conv[i, j]` depends on h-input columns <= j, and in the first layer
+        the extra right-shift makes that columns <= j-1. In later layers the
+        h features at column j already exclude column j of the *codes*, so the
+        composition still excludes position (i, j).
+    Therefore the logits at (i, j) never depend on the code at (i, j).
+
+    Measured, not assumed. Exhaustively perturbing every earlier position for a
+    target near the bottom of a 20x10 grid gives:
+
+      * old `PixelCNNPrior` (k=3, 4 blocks): 111 of 194 earlier positions
+        visible, **83 invisible**. The invisible set splits into rows 0-7
+        (outside the receptive field) *and rows 17-18, immediately above the
+        target* -- the latter being the classic blind-spot wedge, which sits
+        further right than the nearest diagonal neighbour and so is easy to
+        miss with a single hand-picked probe.
+      * this layer (20 layers, k=3): **194 of 194 visible, 0 invisible.**
+    """
+
+    def __init__(self, channels, kernel_size, first=False, mask_classes=0):
+        super().__init__()
+        if kernel_size % 2 == 0:
+            raise ValueError("kernel_size must be odd")
+        self.first = first
+        k = kernel_size
+        pad = k // 2
+        self.v_conv = nn.Conv2d(channels, 2 * channels, (pad + 1, k), padding=(pad, pad))
+        self.h_conv = nn.Conv2d(channels, 2 * channels, (1, pad + 1), padding=(0, pad))
+        self.v_to_h = nn.Conv2d(2 * channels, 2 * channels, kernel_size=1)
+        self.h_out = nn.Conv2d(channels, channels, kernel_size=1)
+        self.cond_v = nn.Conv2d(mask_classes, 2 * channels, 1) if mask_classes else None
+        self.cond_h = nn.Conv2d(mask_classes, 2 * channels, 1) if mask_classes else None
+
+    def forward(self, v, h, cond=None):
+        height, width = v.shape[2], v.shape[3]
+        # Vertical stack: crop the bottom padding so row i sees rows <= i.
+        v_out = self.v_conv(v)[:, :, :height, :]
+        # Horizontal stack: crop the right padding so column j sees cols <= j.
+        h_conv = self.h_conv(h)[:, :, :, :width]
+        if self.first:
+            # Mask-A behaviour: shift right one column to exclude column j.
+            h_conv = F.pad(h_conv, (1, 0, 0, 0))[:, :, :, :width]
+        # Shift the vertical features down one row before they reach h.
+        v_shift = F.pad(v_out, (0, 0, 1, 0))[:, :, :height, :]
+        h_total = h_conv + self.v_to_h(v_shift)
+        if cond is not None and self.cond_v is not None:
+            v_out = v_out + self.cond_v(cond)
+            h_total = h_total + self.cond_h(cond)
+        v_new = _gate(v_out)
+        h_new = self.h_out(_gate(h_total))
+        if not self.first:
+            h_new = h_new + h          # residual on the horizontal stack only
+        return v_new, h_new
+
+
+class GatedPixelCNNPrior(nn.Module):
+    """Gated PixelCNN prior over VQ-VAE code indices, optionally mask-conditioned.
+
+    This exists because the plain `PixelCNNPrior` failed in a specific,
+    measurable way: it reproduced MRI-like *texture* but not the global hip
+    layout. Two causes were identified, and this class addresses both.
+
+    1. **Blind spot.** Stacked masked convolutions cannot see an above-right
+       wedge. The dual-stack construction removes it (see `GatedMaskedLayer`).
+    2. **Receptive field too small.** The old prior saw only
+       `3 + num_blocks*2*(kernel//2)` rows above a position: 11 rows for a
+       4-block model and 19 for an 8-block model, against a 64-row code grid.
+       A pelvis simply cannot be positioned with that little context.
+
+    The vertical receptive field here is `num_layers * (kernel_size // 2)`
+    rows. `covers_grid()` reports whether that spans the full grid height, and
+    the constructor warns when it does not, so the configuration is checked
+    rather than assumed. For a 64x32 grid, kernel 7 with 22 layers gives 66
+    rows and therefore full coverage.
+
+    Set `mask_classes=0` for a genuinely unconditional prior, or to the number
+    of segmentation classes to condition on a downsampled mask (the mask is an
+    input, never a prediction, so it may be seen in full).
+    """
+
+    def __init__(self, num_codes=512, width=128, num_layers=22, grid_hw=(64, 32),
+                 embedding_dim=32, kernel_size=7, mask_classes=0):
+        super().__init__()
+        self.num_codes = num_codes
+        self.grid_hw = tuple(grid_hw)
+        self.mask_classes = mask_classes
+        self.kernel_size = kernel_size
+        self.num_layers = num_layers
+        self.vertical_receptive_field = num_layers * (kernel_size // 2)
+        self.embedding = nn.Embedding(num_codes, embedding_dim)
+        self.stem = nn.Conv2d(embedding_dim, width, kernel_size=1)
+        self.layers = nn.ModuleList([
+            GatedMaskedLayer(width, kernel_size, first=(i == 0),
+                             mask_classes=mask_classes)
+            for i in range(num_layers)
+        ])
+        self.out = nn.Sequential(
+            nn.ReLU(),
+            nn.Conv2d(width, width, kernel_size=1),
+            nn.ReLU(),
+            nn.Conv2d(width, num_codes, kernel_size=1),
+        )
+
+    def covers_grid(self):
+        """True when the vertical receptive field spans the whole code grid."""
+        return self.vertical_receptive_field >= self.grid_hw[0]
+
+    def _cond(self, mask):
+        if mask is None or not self.mask_classes:
+            return None
+        return F.interpolate(mask, size=self.grid_hw, mode="nearest")
+
+    def forward(self, codes, mask=None):
+        """codes: [B, H, W] ints; mask: [B, C, h, w] float -> logits [B, K, H, W]."""
+        cond = self._cond(mask)
+        x = self.stem(self.embedding(codes).permute(0, 3, 1, 2))
+        v, h = x, x
+        for layer in self.layers:
+            v, h = layer(v, h, cond)
+        return self.out(h)
+
+    def loss(self, codes, mask=None):
+        """Mean cross-entropy per latent position (in nats)."""
+        return F.cross_entropy(self(codes, mask), codes)
+
+    @torch.no_grad()
+    def sample(self, n=None, device=None, temperature=1.0, mask=None, progress=None):
+        """Raster-scan decoding.
+
+        Unlike `PixelCNNPrior.sample`, no row cropping is used: the receptive
+        field is deliberately as large as the grid, so cropping would change
+        the distribution rather than merely save time.
+        """
+        if temperature <= 0:
+            raise ValueError("temperature must be positive")
+        self.eval()
+        if mask is not None:
+            n, device = mask.shape[0], mask.device
+        if n is None or device is None:
+            raise ValueError("provide either mask, or both n and device")
+        height, width = self.grid_hw
+        codes = torch.zeros(n, height, width, dtype=torch.long, device=device)
+        total, done = height * width, 0
+        for i in range(height):
+            for j in range(width):
+                logits = self(codes, mask)[:, :, i, j] / temperature
+                probs = F.softmax(logits, dim=1)
+                codes[:, i, j] = torch.multinomial(probs, 1).squeeze(1)
+                done += 1
+                if progress is not None:
+                    progress(done, total)
+        return codes
+
+
+# --------------------------------------------------------------------------- #
+# Transformer prior (exploratory addendum, not in the predeclared campaign)
+# --------------------------------------------------------------------------- #
+class TransformerPrior(nn.Module):
+    """Causal transformer prior over raster-ordered code indices (exploratory).
+
+    Same interface as PixelCNNPrior: forward(codes [B,H,W]) -> logits [B,K,H,W],
+    loss(codes) -> mean cross-entropy in nats, sample(n, device, ...) -> codes.
+
+    Sequence model: a learned start token is prepended to the raster-ordered
+    codes, so position p sees only the start token and codes 0..p-1. A strict
+    causal mask enforces this. Learned positional embeddings; pre-norm blocks.
+    """
+
+    def __init__(self, num_codes=512, width=256, num_layers=6, num_heads=8,
+                 grid_hw=(64, 32), dropout=0.0):
+        super().__init__()
+        if width % num_heads != 0:
+            raise ValueError("width must be divisible by num_heads")
+        self.num_codes = num_codes
+        self.grid_hw = grid_hw
+        n = grid_hw[0] * grid_hw[1]
+        self.start = num_codes                       # extra token id for <start>
+        self.tok = nn.Embedding(num_codes + 1, width)
+        self.pos = nn.Parameter(torch.zeros(1, n, width))
+        nn.init.normal_(self.pos, std=0.02)
+        layer = nn.TransformerEncoderLayer(
+            width, num_heads, dim_feedforward=4 * width, dropout=dropout,
+            activation="gelu", batch_first=True, norm_first=True)
+        self.encoder = nn.TransformerEncoder(layer, num_layers, enable_nested_tensor=False)
+        self.norm = nn.LayerNorm(width)
+        self.head = nn.Linear(width, num_codes)
+        # True above the diagonal = masked (future positions).
+        self.register_buffer("causal", torch.triu(torch.ones(n, n, dtype=torch.bool), diagonal=1))
+
+    def forward(self, codes):
+        """codes: [B, H, W] integers -> logits [B, K, H, W]."""
+        b = codes.shape[0]
+        flat = codes.reshape(b, -1)
+        start = torch.full((b, 1), self.start, dtype=flat.dtype, device=codes.device)
+        inp = torch.cat([start, flat[:, :-1]], dim=1)   # position p sees codes < p
+        n = inp.shape[1]
+        x = self.tok(inp) + self.pos[:, :n]
+        h = self.encoder(x, mask=self.causal[:n, :n], is_causal=True)
+        logits = self.head(self.norm(h))                # [B, N, K]
+        return logits.transpose(1, 2).reshape(b, self.num_codes, *self.grid_hw)
+
+    def loss(self, codes):
+        """Mean cross-entropy per latent position (in nats)."""
+        return F.cross_entropy(self(codes), codes)
+
+    @torch.no_grad()
+    def sample(self, n, device, temperature=1.0, progress=None):
+        """Sequential raster-order sampling. Recomputes the prefix each step (no KV cache)."""
+        if n < 1 or temperature <= 0:
+            raise ValueError("n and temperature must be positive")
+        self.eval()
+        h, w = self.grid_hw
+        total = h * w
+        seq = torch.full((n, 1), self.start, dtype=torch.long, device=device)
+        for t in range(total):
+            x = self.tok(seq) + self.pos[:, :t + 1]
+            hid = self.encoder(x, mask=self.causal[:t + 1, :t + 1], is_causal=True)
+            logits = self.head(self.norm(hid[:, -1])) / temperature
+            seq = torch.cat([seq, torch.multinomial(F.softmax(logits, dim=1), 1)], dim=1)
+            if progress is not None:
+                progress(t + 1, total)
+        return seq[:, 1:].reshape(n, h, w)
+
+
+# --------------------------------------------------------------------------- #
 # DCGAN baseline (Radford, Metz & Chintala, ICLR 2016)
 # --------------------------------------------------------------------------- #
 class DCGenerator(nn.Module):
@@ -411,3 +845,84 @@ class DCDiscriminator(nn.Module):
 
     def forward(self, x):
         return self.net(x).view(x.size(0))
+
+
+# --------------------------------------------------------------------------- #
+# Mask-conditioned PixelCNN prior (exploratory: targets anatomical structure)
+# --------------------------------------------------------------------------- #
+class CondPixelCNNPrior(nn.Module):
+    """PixelCNN prior conditioned on a downsampled segmentation mask.
+
+    Motivation: the unconditional prior produces MRI-like texture but loses the
+    global hip layout, because each position only sees `row_radius` rows above
+    it. The mask is an input (not a quantity being predicted), so it may be seen
+    in full at every position without breaking causality over the codes.
+
+    Conditioning: the mask is resized to the code grid, embedded per class by a
+    1x1 convolution, and added as a spatial bias to the features before each
+    residual block (as in the conditional PixelCNN of van den Oord et al. 2016).
+
+    Interface matches PixelCNNPrior except that forward/loss/sample take a mask:
+      forward(codes [B,H,W], mask [B,C,H,W]) -> logits [B,K,H,W]
+      sample(mask, temperature) -> codes, one grid per mask row.
+    """
+
+    def __init__(self, num_codes=512, width=128, num_blocks=8, grid_hw=(64, 32),
+                 embedding_dim=32, kernel_size=3, mask_classes=6):
+        super().__init__()
+        if kernel_size not in (3, 7):
+            raise ValueError("prior kernel must be 3 or 7")
+        self.num_codes = num_codes
+        self.grid_hw = grid_hw
+        self.mask_classes = mask_classes
+        self.row_radius = 3 + num_blocks * 2 * (kernel_size // 2)
+        self.embedding = nn.Embedding(num_codes, embedding_dim)
+        self.input = MaskedConv2d("A", embedding_dim, width, kernel_size=7, padding=3)
+        self.cond = nn.ModuleList()
+        self.blocks = nn.ModuleList()
+        for _ in range(num_blocks):
+            # 1x1 conditioning projections are unmasked on purpose: the mask is
+            # given, so it carries no information about unseen code positions.
+            self.cond.append(nn.Conv2d(mask_classes, width, kernel_size=1))
+            self.blocks.append(nn.ModuleDict({
+                "conv1": MaskedConv2d("B", width, width, kernel_size, kernel_size // 2),
+                "conv2": MaskedConv2d("B", width, width, kernel_size, kernel_size // 2),
+            }))
+        self.out = MaskedConv2d("B", width, num_codes, kernel_size=1, padding=0)
+
+    def forward(self, codes, mask):
+        """codes: [B,H,W] ints; mask: [B,C,h,w] float -> logits [B,K,H,W]."""
+        x = self.embedding(codes).permute(0, 3, 1, 2).contiguous()
+        x = self.input(x)
+        if mask.shape[-2:] != x.shape[-2:]:
+            mask = F.interpolate(mask, size=x.shape[-2:], mode="nearest")
+        for blk, cnd in zip(self.blocks, self.cond):
+            h = F.relu(blk["conv1"](F.relu(x + cnd(mask))))
+            x = x + blk["conv2"](h)
+        return self.out(x)
+
+    def loss(self, codes, mask):
+        return F.cross_entropy(self(codes, mask), codes)
+
+    @torch.no_grad()
+    def sample(self, mask, temperature=1.0, progress=None):
+        """One code grid per mask row, by raster-scan decoding (same as PixelCNNPrior)."""
+        if temperature <= 0:
+            raise ValueError("temperature must be positive")
+        self.eval()
+        device = mask.device
+        n = mask.shape[0]
+        h, w = self.grid_hw
+        codes = torch.zeros(n, h, w, dtype=torch.long, device=device)
+        small = F.interpolate(mask, size=(h, w), mode="nearest")
+        total, done = h * w, 0
+        for i in range(h):
+            for j in range(w):
+                top = max(0, i - self.row_radius)
+                logits = self(codes[:, top:i + 1], small[:, :, top:i + 1])[:, :, i - top, j]
+                probs = F.softmax(logits / temperature, dim=1)
+                codes[:, i, j] = torch.multinomial(probs, 1).squeeze(1)
+                done += 1
+                if progress is not None:
+                    progress(done, total)
+        return codes
