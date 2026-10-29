@@ -1,9 +1,0 @@
-{
-  "protocol": "real test slice vs nearest real validate slice by pixel L2, SSIM",
-  "n": 540,
-  "mean_ssim": 0.2504238188266754,
-  "median_ssim": 0.24510660767555237,
-  "fraction_ge_0.6": 0.0,
-  "min": 0.15428364276885986,
-  "max": 0.3417069911956787
-}

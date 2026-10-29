@@ -13,3 +13,6 @@ logs/
 
 # AI assistant working directory (not for submission)
 .ai/
+_archive/
+__pycache__/
+logs/
