@@ -536,18 +536,33 @@ honest conclusion is that the two models are not separated by this metric at
 this sample size, which is why the recommendation in Section 8 does not rest
 on KID alone.
 
-**Resources (A100-PCIE-40GB).**
+**Resources (A100-PCIE-40GB).** Parameter counts are exact, obtained by
+instantiating each model at its reported configuration and summing
+`p.numel()` over `model.parameters()`.
 
-| Model | Epoch time (s) | Peak training VRAM (GB) | Time for 500 samples |
-|---|---:|---:|---:|
-| VQ-VAE (selected) | 8.21 | 1.03 | - |
-| PixelCNN prior (selected) | 7.85 | 0.68 | about 40 s |
-| DCGAN | 8.65 | 1.01 | about 0.08 s |
+| Model | Parameters | Epoch time (s) | Peak training VRAM (GB) | Time for 500 samples |
+|---|---:|---:|---:|---:|
+| VQ-VAE (selected, single-level) | 1,234,497 (1.23 M) | 8.21 | 1.03 | - |
+| VQ-VAE-2 (hierarchical) | 3,005,697 (3.01 M) | not recorded | not recorded | - |
+| PixelCNN prior (selected) | 1,463,936 (1.46 M) | 7.85 | 0.68 | about 40 s |
+| Transformer prior | 5,526,272 (5.53 M) | not recorded | not recorded | not recorded |
+| DCGAN generator | 1,822,401 (1.82 M) | 8.65 | 1.01 | about 0.08 s |
+| DCGAN discriminator | 3,928,833 (3.93 M) | 8.65 | 1.01 | about 0.08 s |
 
-The campaign did not record parameter counts. Preliminary parameter counts from
-the smoke tests were 1.18 M (VQ-VAE), 2.13 M (PixelCNN prior), and 3.2 M / 2.8 M
-(DCGAN generator / discriminator). Total GPU allocation was 3.03 hours, of which
+The VQ-VAE-2 and Transformer rows are marked "not recorded" because those
+experiments ran outside the instrumented campaign and their per-epoch timings
+and peak memory were not logged; reporting a number for them would be
+fabrication. Their parameter counts are exact because they follow from the
+architecture. Total GPU allocation for the campaign was 3.03 hours, of which
 2.53 hours was training.
+
+**Reading the table.** The Transformer prior is the largest model (5.53 M,
+about 3.8× the PixelCNN prior) yet it is the one that produced coherent
+anatomy, so the improvement is not explained by capacity alone: the PixelCNN
+prior has a larger receptive-field deficit than its parameter count suggests.
+Conversely, the DCGAN discriminator (3.93 M) is larger than its generator
+(1.82 M), which is a common source of adversarial imbalance and is consistent
+with the instability observed in Section 5.5.
 
 ### 6.2 Qualitative results
 
@@ -958,7 +973,9 @@ single score.
 - Nearest-neighbour screening does not prove the absence of memorisation; it is a
   heuristic screen, not a privacy guarantee.
 - No formal differential-privacy bound (ε-δ guarantees) was applied.
-- Parameter counts were not systematically recorded during the campaign.
+- Per-epoch timings and peak VRAM were not logged for the VQ-VAE-2 and
+  Transformer experiments, which ran outside the instrumented campaign; their
+  parameter counts are exact but their resource cost is not measured here.
 
 **Recommended Future Work:**
 - **Multi-center validation:** Evaluate on larger held-out cohorts from multiple

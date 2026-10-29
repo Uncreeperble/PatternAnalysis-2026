@@ -16,3 +16,8 @@ logs/
 _archive/
 __pycache__/
 logs/
+
+# Generated PDF build of README.md. The rubric specifies README.md as the
+# documentation deliverable; the PDF is a local convenience export and is
+# regenerated with pandoc, so it is not committed (it is ~12 MB).
+README.pdf
