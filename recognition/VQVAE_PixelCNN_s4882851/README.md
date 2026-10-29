@@ -8,6 +8,22 @@
 
 This project develops a generative model for synthetic prostate MRI slices using a hierarchical VQ-VAE-2 architecture combined with a Transformer-based prior. Medical imaging research is constrained by patient privacy regulations and limited data availability. The final model achieves excellent reconstruction quality (mean SSIM 0.937 on held-out test data) and successfully generates anatomically coherent synthetic samples. After extensive experimentation, we discovered that PixelCNN priors fail for medical images due to limited receptive fields (~19 rows in a 64-row grid), preventing them from capturing long-range anatomical dependencies. Replacing the fine-level prior with a causal Transformer (full self-attention over 2,048 code positions) solved this fundamental limitation, producing the first anatomically realistic samples with mean intensity 0.159 (88% of training data) and no evidence of memorization. The investigation tested eight different approaches including hierarchical priors, conditioning strategies, latent space sampling, and architectural modifications. Only the Transformer prior succeeded, demonstrating that architectural choices must match task requirements: medical image generation demands global anatomical consistency that local convolutional models cannot provide.
 
+## Key Contributions
+
+This work makes the following contributions to synthetic medical image generation:
+
+1. **Identified and solved the PixelCNN blind spot problem for medical images**: Demonstrated that PixelCNN's limited receptive field (~19 rows) fundamentally prevents anatomically coherent generation in 64-row medical images, and showed that Transformer priors with full self-attention solve this limitation.
+
+2. **Achieved first anatomically realistic synthetic MRI generation**: VQ-VAE-2 + Transformer prior produces samples with recognizable hip anatomy (femoral heads, pelvic bones, tissue boundaries), validated through visual inspection and statistical analysis.
+
+3. **Systematic investigation of generation failure**: Through 8 experiments including decoder isolation, hierarchical priors, conditioning strategies, and latent sampling methods, we isolated the fine prior as the root cause and demonstrated that architectural choices must match task requirements.
+
+4. **Excellent reconstruction with discrete representations**: VQ-VAE-2 achieves mean SSIM 0.937 on held-out test data (540/540 samples ≥ 0.6 threshold), proving discrete codes can capture complex anatomical structure.
+
+5. **Comprehensive privacy and diversity analysis**: Demonstrated no memorization (minimum pairwise distance 20.9), high diversity (mean pairwise distance 36.0), and identified distributional differences that enable AI vs real detection (12% darker, 51% bright pixel deficit).
+
+6. **Reproducible experimental methodology**: All experiments seeded, patient-disjoint splits verified at runtime, validation-based selection, and comprehensive documentation of what worked and what didn't.
+
 ## 1. Problem and description
 
 Medical imaging research is limited by patient privacy rules (HIPAA, GDPR) and
