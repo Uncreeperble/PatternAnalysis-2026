@@ -1,53 +1,96 @@
 # VQ-VAE with PixelCNN Prior for Synthetic Prostate MRI (COMP3710 Project 2.4)
 
-**Student:** Ben Evans (s4882851) &mdash; Hard difficulty &mdash; PyTorch
+**Student:** Ben Evans (48828514) &mdash; Hard difficulty &mdash; PyTorch
 
 > **Final submission for COMP3710 Project 2.4 (Oct 30, 2026).**
 
 ## Abstract
 
-This project develops a generative model for synthetic prostate MRI slices using a hierarchical VQ-VAE-2 architecture combined with a Transformer-based prior. Medical imaging research is constrained by patient privacy regulations and limited data availability. The final model achieves excellent reconstruction quality (mean SSIM 0.937 on held-out test data) and successfully generates anatomically coherent synthetic samples. After extensive experimentation, we discovered that PixelCNN priors fail for medical images due to limited receptive fields (~19 rows in a 64-row grid), preventing them from capturing long-range anatomical dependencies. Replacing the fine-level prior with a causal Transformer (full self-attention over 2,048 code positions) solved this fundamental limitation, producing the first anatomically realistic samples with mean intensity 0.159 (88% of training data) and no evidence of memorization. The investigation tested eight different approaches including hierarchical priors, conditioning strategies, latent space sampling, and architectural modifications. Only the Transformer prior succeeded, demonstrating that architectural choices must match task requirements: medical image generation demands global anatomical consistency that local convolutional models cannot provide.
+This project investigates synthetic prostate MRI generation using vector-quantised
+autoencoders and autoregressive priors, with a DCGAN as a baseline. Patient-disjoint
+evaluation separates reconstruction quality, generation fidelity, diversity and
+memorisation risk. The hierarchical VQ-VAE-2 achieved a mean reconstruction SSIM
+of approximately 0.937, whereas samples from the initial PixelCNN prior did not
+reproduce coherent anatomy. Decoder-isolation and alternative-prior experiments
+suggested that modelling the fine-level codes was an important bottleneck.
+
+A causal Transformer prior produced samples with recognizable anatomical
+structure in the author's visual review, although their mean intensity was
+0.159 compared with 0.180 for the training reference, and their fraction of
+bright pixels remained approximately half that of the reference. The results
+illustrate the distinction between successful reconstruction and plausible
+unconditional generation, while highlighting the need for independent clinical
+validation and more comprehensive privacy assessment.
+
+![Two generated MRI slices](figures/generated_overview.png)
+
+*Opening visual summary: the first two saved, uncurated samples from the
+Experiment 6 Transformer prior at temperature 1.0. Both use the same display
+range, [0, 1]. This illustration is not a clinical assessment; the full sample
+grid and distribution analysis appear in Sections 6.5.4 and 6.6.*
+
+## Contents
+
+| Section | Topic |
+|---|---|
+| [Abstract](#abstract) and [key contributions](#key-contributions) | Research question and principal findings |
+| [Quick Start](#quick-start) | Running the supplied baseline code |
+| [1. Problem and description](#1-problem-and-description) | Clinical motivation and scope |
+| [2. How the algorithm works](#2-how-the-algorithm-works) | VQ-VAE, priors and DCGAN |
+| [3. Feasibility review](#3-feasibility-review) | Initial plan and acceptance criteria |
+| [4. Data](#4-data) | Dataset, preprocessing and patient-disjoint splits |
+| [5. Experiments](#5-experiments) | Baselines, variants and selection |
+| [6. Results](#6-results) | Quantitative and qualitative results |
+| [6.3. Memorisation screen](#63-memorisation-screen) | Nearest-neighbour screening and its limitations |
+| [6.4. Failure autopsies](#64-failure-autopsies) | Case-based analysis |
+| [6.5. Generation failure investigation](#65-generation-failure-investigation) | Isolation experiments and alternative priors |
+| [6.5.6. Training curves](#656-training-curves) | Recorded VQ-VAE-2 and fine-prior histories |
+| [6.6. Generation quality analysis](#66-transformer-generation-quality-analysis) | Diversity and distribution differences |
+| [6.7. Summary](#67-summary-what-worked-and-what-didnt) | Comparison of approaches |
+| [7. Limitations and future work](#7-limitations-and-future-work) | Interpretation, uncertainty and further validation |
+| [8. Recommendation](#8-recommendation-for-the-project-manager) | Practical implications and deployment considerations |
+| [9. Dependencies and reproducibility](#9-dependencies-and-reproducibility) | Environment and experimental setup |
+| [10. Artificial intelligence usage disclosure](#10-artificial-intelligence-usage-disclosure) | Scope of AI assistance |
+| [11. References](#11-references) | Sources |
+| [Appendix A](#appendix-a-additional-experimental-figures) and [Appendix B](#appendix-b-complete-feasibility-review-as-submitted) | Supplementary figures and original feasibility review |
 
 ## Key Contributions
 
-This work makes the following contributions to synthetic medical image generation:
+The project combines a patient-disjoint reconstruction evaluation with a
+systematic investigation of the gap between reconstruction and generation.
+The selected single-level VQ-VAE achieved test SSIM of 0.9425, while the
+hierarchical model achieved approximately 0.937. Decoder-isolation experiments
+indicated that fine-level codes carried much of the observable anatomical
+structure, motivating comparisons between the original PixelCNN and
+alternative priors.
 
-1. **Identified and solved the PixelCNN blind spot problem for medical images**: Demonstrated that PixelCNN's limited receptive field (~19 rows) fundamentally prevents anatomically coherent generation in 64-row medical images, and showed that Transformer priors with full self-attention solve this limitation.
-
-2. **Achieved first anatomically realistic synthetic MRI generation**: VQ-VAE-2 + Transformer prior produces samples with recognizable hip anatomy (femoral heads, pelvic bones, tissue boundaries), validated through visual inspection and statistical analysis.
-
-3. **Systematic investigation of generation failure**: Through 8 experiments including decoder isolation, hierarchical priors, conditioning strategies, and latent sampling methods, we isolated the fine prior as the root cause and demonstrated that architectural choices must match task requirements.
-
-4. **Excellent reconstruction with discrete representations**: VQ-VAE-2 achieves mean SSIM 0.937 on held-out test data (540/540 samples ≥ 0.6 threshold), proving discrete codes can capture complex anatomical structure.
-
-5. **Comprehensive privacy and diversity analysis**: Demonstrated no memorization (minimum pairwise distance 20.9), high diversity (mean pairwise distance 36.0), and identified distributional differences that enable AI vs real detection (12% darker, 51% bright pixel deficit).
-
-6. **Reproducible experimental methodology**: All experiments seeded, patient-disjoint splits verified at runtime, validation-based selection, and comprehensive documentation of what worked and what didn't.
+The resulting analysis reports both strengths and limitations rather than
+relying on a single score. The Transformer samples displayed recognizable
+structure in visual review, but remained darker than the training reference and
+had a lower bright-pixel fraction. Pairwise sample distances and
+nearest-neighbour checks provide preliminary diversity and memorisation
+screens; neither establishes a privacy guarantee or clinical validity.
 
 ## Quick Start
 
-**Running the code:**
+The supplied command-line scripts train and evaluate the **single-level**
+VQ-VAE and its prior or the DCGAN baseline. Set `DATA_ROOT` to the local
+`keras_slices_data` directory before running from this project directory:
 
 ```bash
-# Train VQ-VAE-2
-python train.py --model vqvae2 --epochs 100 --seed 0
-
-# Train Transformer prior
-python train.py --model transformer_prior --vqvae_checkpoint path/to/vqvae.pt --epochs 40
-
-# Generate samples
-python predict.py --model transformer --checkpoint path/to/prior.pt --num_samples 500
+python train.py --model vqvae --data-root "$DATA_ROOT" --epochs 100 --seed 0 --out checkpoints/vqvae
+python train.py --model prior --prior-type pixelcnn --data-root "$DATA_ROOT" --vqvae-checkpoint checkpoints/vqvae/vqvae_best.pt --epochs 40 --out checkpoints/prior
+python predict.py --data-root "$DATA_ROOT" --vqvae checkpoints/vqvae/vqvae_best.pt --prior checkpoints/prior/prior_best.pt --n-samples 500 --sample-seeds 0 --out outputs/evaluation
 ```
 
-**Key files:**
-- `modules.py` - Model architectures (VQ-VAE-2, Transformer prior, DCGAN)
-- `dataset.py` - HipMRI data loading with patient-disjoint splits
-- `train.py` - Training script with validation-based checkpointing
-- `predict.py` - Generation and evaluation
-
-**Requirements:** PyTorch 2.13+, CUDA-capable GPU (A100 recommended), HipMRI dataset
-
-Full deployment details and experimental methodology are described in Section 8 (Recommendation for the project manager) and Section 9 (Dependencies and reproducibility).
+The scripts also expose `--prior-type transformer` for the single-level prior.
+The hierarchical VQ-VAE-2 experiments described in Section 6.5 used separate
+experimental scripts; the commands above do not reproduce that pipeline.
+`dataset.py` loads the data, `modules.py` defines the models, `train.py` trains
+them, `predict.py` performs generation and evaluation, and `runtime.py` provides
+shared checkpoint and runtime utilities. The HipMRI dataset and model
+checkpoints are not included in the repository. The evaluation requires the
+dependencies described in Section 9; a CUDA-capable GPU is recommended.
 
 ## 1. Problem and description
 
@@ -134,18 +177,17 @@ Sample from this distribution (with optional temperature scaling), fill in that
 position, and continue. After 2,048 sequential predictions, pass the completed
 code grid through the VQ-VAE decoder to get an image.
 
-### 2.4 Transformer Prior (Solution to Blind Spot)
+### 2.4 Transformer Prior and Long-Range Context
 
 After discovering the PixelCNN blind spot problem (section 6.5.3), we replaced the
 fine prior with a **causal Transformer** that uses full self-attention over all
 2,048 code positions.
 
-**Architecture:**
-- Input: 64×32 grid flattened to 2,048 tokens in raster order
-- Learned positional embeddings (2D-aware: encodes both row and column)
-- 6 Transformer layers, 8 attention heads, embedding dimension 256
-- Causal masking: position i can attend to all positions j < i
-- Output: probability distribution over 2,048 codes for each position
+The 64×32 fine-code grid is flattened into 2,048 tokens in raster order. The
+prior uses learned positional embeddings, six Transformer layers, eight
+attention heads and an embedding dimension of 256. Causal masking permits
+each position to attend to preceding positions only, and the output at each
+position is a probability distribution over code indices.
 
 **Key difference from PixelCNN:**
 
@@ -156,11 +198,12 @@ fine prior with a **causal Transformer** that uses full self-attention over all
 | Long-range dependencies | Cannot model | **Fully captured** |
 | Computational cost | O(n) | O(n²) |
 
-**Why Transformers solve the blind spot:**
-- PixelCNN: Position (row 60, col 15) can only see rows 41-60 due to limited
-  receptive field. It cannot see the femoral head in row 10.
-- Transformer: Position (row 60, col 15) attends to ALL 1,935 previous positions
-  via self-attention. It sees the entire anatomical context.
+For example, the tested PixelCNN at row 60 and column 15 has limited access
+to earlier rows and cannot directly use information from row 10. The causal
+Transformer at the same location can attend to the 1,935 preceding positions
+in raster order. Access to this context is a plausible explanation for the
+observed improvement, although other architectural and training differences
+also affect the comparison.
 
 **Training:** 40 epochs, batch size 32, learning rate 3e-4, AdamW optimizer.
 Validation NLL converged to 3.84 (vs PixelCNN's 4.05).
@@ -299,7 +342,7 @@ to 128 entries lowered perplexity and did not help.
 
 The PixelCNN prior was trained on the frozen selected VQ-VAE. The selected prior
 reached a validation NLL of 3.455 nats per code. Other prior variants ranged from
-2.924 to 3.602 nats; these are reported in `RESULTS.md`. The selected prior's
+2.924 to 3.602 nats. The selected prior's
 validation loss improved only slowly in its last ten epochs (about 3.468 at
 epoch 30 and 3.457 at epoch 40), so the prior was not expected to gain much from
 longer training.
@@ -419,8 +462,7 @@ near-copies.
 
 Four cases were selected by fixed numeric rules from the selected model's audit
 files (`vqvae_prior_audit.csv`, `reconstruction_scores.csv`), not by eye. The
-visual description of each case is still to be written after the student
-reviews the image.
+table records the selected rule, numerical evidence and author's visual review.
 
 | Case | Rule | Evidence | Nearest training slice | Visual description |
 |---|---|---|---|---|
@@ -439,15 +481,16 @@ have mean intensities of 0.091, 0.073 and 0.115, against a median of 0.150 acros
 all samples. They are in the dark tail, which explains their low nearest-training
 RMSE (see section 6.3).
 
-**Author's visual review of the grids.** Case A and C grids show each generated
-sample next to its nearest training slice: the generated samples look unrealistic
-and the training slices look like hips. Case B's generated samples are dark and
-do not look like hips. Case D (patient 042, lowest reconstruction SSIM) still
-looks like a hip with more fine detail than typical. The uncurated fixed-seed
-grid (`vqvae_prior_seed0.png`) was reviewed by the author, who found that none of
-its samples look like hip anatomy. This means generation fails on typical
-samples, not only on the outlier cases selected above. Reconstruction, by
-contrast, looks like hip anatomy to the author.
+**Author's visual review of the grids.** In cases A and C, the generated
+samples lacked recognizable anatomical organisation relative to their nearest
+training slices. Case B samples were dark and similarly lacked recognizable
+hip structures. The reconstruction in case D retained recognizable anatomy
+despite having the lowest reconstruction SSIM. The author also reviewed the
+uncurated fixed-seed grid (`vqvae_prior_seed0.png`) and did not identify
+recognizable hip anatomy in those samples. This suggests that the selected
+PixelCNN's visual limitations extend beyond the numerically selected outliers;
+the assessment remains an informal visual review rather than a blinded
+clinical evaluation.
 
 ## 6.5 Generation Failure Investigation
 
@@ -509,64 +552,66 @@ each position a receptive field of approximately:
 - Horizontal: full row (due to raster-order causality)
 - Vertical: ~19 rows above the current position
 
-For a 64-row grid, this means **positions in the bottom half can only see the top
-~30% of the image**. Hip anatomy requires long-range vertical dependencies (femoral
-head connects to pelvis across 40+ rows), which the PixelCNN cannot capture.
-
-**Evidence:** When sampling row-by-row, the model generates plausible texture for
-the first ~20 rows, then produces incoherent patterns for the remaining 44 rows
-because it cannot see the global anatomical context.
+On a 64-row grid, a position near the bottom cannot directly access rows far
+above its local receptive field. Anatomical structures can span a much larger
+vertical distance, so this limited context is a plausible contributor to
+incoherent global structure. The failure is consistent with this hypothesis,
+but the comparison does not independently establish causation.
 
 ### 6.5.4 Attempted Solutions
 
 After identifying the blind spot problem, multiple alternative approaches were tested:
 
-**1. VQ-VAE-2 with hierarchical priors (Oct 26-27)**
-- Upgraded to two-level VQ-VAE-2: coarse 16×8 (128 codes) + fine 64×32 (2048 codes)
-- Trained separate PixelCNN priors for coarse and fine levels
-- Fine prior conditioned on coarse codes
-- **Result:** Reconstruction improved to SSIM 0.937, but generation still failed
-  (bright_frac 0.037, mean 0.136). The blind spot persists in the fine prior.
+**Hierarchical VQ-VAE-2 and PixelCNN priors (26–27 October).** The model was
+extended to use a 16×8 coarse grid and a 64×32 fine grid, with separate priors
+for the two levels. Reconstruction SSIM reached approximately 0.937, but the
+generated images remained anatomically incoherent, with mean intensity 0.136
+and bright-pixel fraction 0.037. The improvement in reconstruction therefore
+did not transfer automatically to unconditional generation. Fine-level
+conditioning was investigated separately in Experiment 2.
 
-**2. Transformer-based coarse prior (Oct 29, Experiment 4)**
-- Replaced coarse PixelCNN with causal Transformer (full attention, no blind spot)
-- 6 layers, 8 heads, embedding dim 256
-- Trained for 150 epochs, validation NLL converged
-- **Result:** Coarse codes improved, but fine prior still bottleneck. Generated
-  samples had better global structure but still no coherent anatomy (bright_frac
-  0.053, mean 0.168).
+**Transformer coarse prior (Experiment 4).** The coarse PixelCNN was replaced
+with a causal Transformer comprising six layers, eight attention heads and
+embedding dimension 256. After 150 training epochs, samples showed improved
+global structure and a mean intensity of 0.168, with bright-pixel fraction
+0.053, but did not display coherent anatomy. This result is consistent with
+the isolation experiment: improving coarse codes alone was insufficient when
+the fine prior remained unchanged.
 
-**3. Conditioned fine prior (Oct 29, Experiment 2)**
-- Fine PixelCNN explicitly conditioned on coarse codes (concatenated as input)
-- Trained for 150 epochs, validation NLL ~4.0
-- **Result:** No improvement. Conditioning helps the prior learn the joint
-  distribution but doesn't solve the receptive field limitation (bright_frac 0.054).
+**Conditioned fine prior (Experiment 2).** The fine PixelCNN was explicitly
+conditioned on coarse codes and trained for 150 epochs, reaching validation
+NLL of approximately 4.0. Its bright-pixel fraction was 0.054, and visual
+quality did not improve substantially. Conditioning supplies information from
+the coarse representation, but does not by itself enlarge the fine prior's
+spatial receptive field.
 
-**4. Latent space sampling methods (Oct 29, Experiment 7)**
-- **PCA sampling:** Project training codes to PCA space, sample from Gaussian,
-  project back and snap to nearest codes. Result: blurry, MRI-ish but not anatomical
-  (bright_frac 0.051, mean 0.189).
-- **Latent mixup:** Dirichlet-weighted interpolation between real code sequences.
-  Result: looks like "2 images squished together" (bright_frac 0.026, mean 0.155).
-- **Prefix-conditioned completion:** Use real codes for top 16 or 32 rows, let
-  PixelCNN complete the bottom. Result: H32 (32-row prefix) achieved best statistics
-  (bright_frac 0.087, mean 0.208) but still "not very real" on visual inspection.
+**Latent-space alternatives (Experiment 7).** PCA sampling projected training
+codes into a lower-dimensional space, sampled from a Gaussian, and mapped
+the result back to discrete codes. Images were blurred and lacked clear
+anatomy despite a mean intensity of 0.189 and bright-pixel fraction of 0.051.
+Dirichlet-weighted latent mixup produced overlapping structures, with mean
+0.155 and bright-pixel fraction 0.026. In prefix-conditioned completion, the
+first 16 or 32 rows were taken from real codes and the remaining rows sampled
+by the PixelCNN. The 32-row prefix produced mean intensity 0.208 and
+bright-pixel fraction 0.087, but visual quality remained limited. Because the
+completion methods use real codes, their results are not unconditional samples.
 
-**5. Gated PixelCNN with full receptive field (Oct 29, Experiment 8)**
-- 22 layers with 7×7 kernels to cover full 64-row grid
-- Gated activations for increased capacity
-- **Result:** Training completed (val NLL 4.05), but generation not evaluated
-  due to time constraints. The Transformer approach (below) already solved the problem.
+**Gated PixelCNN (Experiment 8).** A 22-layer gated prior with 7×7 kernels was
+trained to increase the spatial receptive field. Its validation NLL was 4.05;
+generation was not evaluated within the available time. It is therefore not
+possible to conclude from this experiment whether the larger convolutional
+receptive field would have improved the samples.
 
-**6. Transformer fine prior (Oct 29, Experiment 6): SUCCESS**
-- Replaced fine PixelCNN with causal Transformer over 2,048 tokens
-- Full self-attention eliminates blind spot problem (see section 2.4)
-- 6 layers, 8 heads, embedding dim 256, 40 epochs training
-- **Result: First anatomically realistic samples!**
-  - Visual quality: samples show recognizable hip anatomy with bone structures
-  - Statistics (T=1.0): mean 0.159 (88% of train), bright_frac 0.049 (51% of train)
-  - Validation NLL: 3.84 (better than PixelCNN's 4.05)
-  - No memorization detected (see section 6.6.2)
+**Transformer fine prior (Experiment 6).** The fine PixelCNN was replaced by a
+causal Transformer with six layers, eight attention heads, embedding dimension
+256 and attention across the 2,048-token sequence. After 40 epochs its
+validation NLL was 3.84, compared with approximately 4.05 for the PixelCNN
+comparison. At temperature 1.0, the samples had mean intensity 0.159 and
+bright-pixel fraction 0.049, corresponding to approximately 88% and 51% of
+the training-reference values. The author observed recognizable hip
+structures in the sample grid. The diversity and memorisation screens are
+discussed separately in Section 6.6; they do not constitute clinical or
+privacy certification.
 
 ![Transformer-generated samples](figures/transformer_samples.png)
 
@@ -578,29 +623,30 @@ these show recognizable anatomical structure.*
 *Side-by-side comparison: real test reconstructions (left) vs Transformer-generated
 samples (right). Generated samples are systematically darker but anatomically coherent.*
 
-**Why the Transformer works:** Full self-attention allows each code position to
-see ALL previous positions, not just the ~19 rows visible to PixelCNN. This enables
-the model to maintain anatomical coherence across the entire 64-row image—the
-femoral head in row 10 can inform the pelvis structure in row 50.
+**Interpretation.** Causal self-attention gives each token access to all
+preceding tokens, whereas the tested PixelCNN has a limited local receptive
+field. This provides a plausible mechanism for the improvement in global
+structure. The experiments support this interpretation but do not isolate
+receptive field as the sole cause: the models also differ in architecture,
+capacity and optimisation.
 
 ### 6.5.5 Why This Matters
 
-The generation failure is not a minor quality issue—it's a fundamental limitation
-of the autoregressive prior architecture for this task. The investigation revealed:
+The experiments demonstrate why reconstruction and unconditional generation
+must be assessed separately. The VQ-VAE-2 reconstructed held-out images with
+SSIM of approximately 0.937, and the isolation experiment showed that the
+decoder could retain recognizable structure when supplied with real fine codes.
+Replacing those codes with samples from the tested PixelCNN caused a marked
+degradation, implicating the fine-code distribution as a substantial
+bottleneck in this pipeline.
 
-1. **VQ-VAE reconstruction is excellent** (SSIM 0.937), proving the discrete
-   representation can capture anatomy.
-2. **The decoder is not the bottleneck**—it can produce perfect anatomy from
-   real codes.
-3. **The fine prior's limited receptive field** prevents it from modeling the
-   long-range dependencies required for anatomical coherence.
-4. **Multiple sophisticated alternatives** (Transformers, conditioning, latent
-   sampling) either don't solve the problem or are not true learned priors.
-
-This demonstrates the importance of **architectural choices matching task requirements**:
-medical image generation requires global anatomical consistency, which autoregressive
-models with local receptive fields cannot provide, even with high reconstruction
-quality.
+The Transformer results suggest that greater access to preceding context can
+improve the generated structures, although the experiments do not prove that
+receptive field alone explains the difference. The gated PixelCNN was not
+evaluated for generation, and the Transformer samples retain measurable
+intensity-distribution differences. Consequently, neither the Transformer nor
+the rejected alternatives should be treated as clinically validated solely on
+the basis of this comparison.
 
 ### 6.5.6 Training Curves
 
@@ -648,9 +694,12 @@ we conducted detailed analysis of diversity, memorization, and distribution fide
 | T=0.9 | 37.3 | 9.3 |
 | T=1.0 | 36.0 | 5.8 |
 
-The high pairwise distances (mean ~36 on 256×128 images) confirm that samples are
-diverse—not copies of each other or of training data. T=0.9 produces slightly more
-diverse samples with higher variance, while T=1.0 produces more consistent quality.
+The average pairwise distances indicate measurable variation among the sampled
+images; the T=0.9 set has a slightly higher mean and a wider spread than the
+T=1.0 set. Pixel-space distance is affected by brightness and texture as well
+as anatomy, however, and cannot establish coverage of the real population.
+These generated-to-generated distances also do not test whether a sample is
+similar to a training image.
 
 #### 6.6.2 Memorization Check
 
@@ -664,11 +713,12 @@ most similar pair of generated samples (still visually distinct).*
 - Mean pairwise distance: 36.0
 - Maximum pairwise distance: 49.4
 
-The minimum distance of 20.9 between any two generated samples confirms that the
-model is not producing duplicates or near-duplicates. Even the most similar pair
-shows distinct anatomical variations. This, combined with the earlier nearest-neighbor
-analysis showing generated samples are distinct from training data, provides strong
-evidence against memorization.
+The minimum distance of 20.9 is between two generated samples; it indicates that
+the examined set does not contain identical generated images under this
+metric. It does not measure distance to training data and cannot by itself
+exclude memorisation. The earlier nearest-neighbour analysis concerns the
+PixelCNN campaign rather than establishing the Transformer model's privacy.
+A separate generated-to-training audit would be required for the latter.
 
 #### 6.6.3 AI vs Real Detection: Distribution Differences
 
@@ -682,34 +732,20 @@ evidence against memorization.
 | Std deviation | 0.169 | 0.170 | 100.7% |
 | Bright pixels (>0.5) | 9.69% | 4.95% | 51.1% |
 
-**Observable differences (potential detection signals):**
+The generated samples are approximately 12% darker on average and contain
+about half the fraction of bright pixels observed in the training reference.
+Their overall pixel standard deviation is similar, but a match in this
+aggregate statistic does not establish that local textures or anatomical
+structures have the correct distribution. Mean intensity and bright-pixel
+fraction are potential detection features; a classifier based on them would
+require a separately defined evaluation before its accuracy could be claimed.
 
-1. **Systematic darkness:** Generated samples are 12% darker on average. This could
-   be detected by a simple mean intensity threshold.
-
-2. **Bright pixel deficit:** Generated samples have only 51% of the bright pixel
-   fraction of real images. This is the most detectable difference—a classifier
-   checking bright_frac > 0.07 would correctly identify most generated samples.
-
-3. **Standard deviation match:** Interestingly, the overall intensity variance
-   matches well (100.7%), suggesting the Transformer captures local texture
-   variation correctly.
-
-**Implications for clinical use:**
-
-These distribution differences mean that while the Transformer generates
-anatomically coherent images, they are **statistically distinguishable from real
-MRI scans**. For applications requiring statistical fidelity (e.g., training
-downstream models, augmenting datasets for research), additional calibration
-would be needed:
-
-- Post-processing intensity adjustment
-- Distribution matching via histogram equalization
-- Training with explicit distribution constraints
-
-This is analogous to RNG validation: a generator may produce "random-looking"
-numbers that fail statistical tests. Similarly, our generator produces
-"MRI-looking" images that fail distribution tests.
+For research augmentation, these systematic differences could become shortcuts
+for a downstream classifier. Possible interventions include intensity
+calibration, histogram-based matching and explicit distribution constraints
+during training. Each would need evaluation on patient-disjoint data, since
+matching marginal intensity statistics alone would not necessarily correct
+anatomical errors.
 
 ### 6.7 Summary: What Worked and What Didn't
 
@@ -717,11 +753,11 @@ numbers that fail statistical tests. Similarly, our generator produces
 |---|---|---|---|
 | VQ-VAE (single level) | SSIM 0.93 | Failed | Codebook collapse initially |
 | VQ-VAE-2 (hierarchical) | SSIM 0.94 | Failed | Better reconstruction, same generation issues |
-| PixelCNN prior | - | Failed | Blind spot prevents anatomical coherence |
+| PixelCNN prior | - | Failed | Limited context is a plausible contributing factor |
 | Transformer coarse prior | - | Partial | Improved global structure, fine prior still fails |
 | Conditioned fine prior | - | Failed | Conditioning doesn't fix receptive field |
 | Latent sampling (PCA, mixup) | - | Failed | Not true learned priors |
-| **Transformer fine prior** | - | **Success** | Full attention solves blind spot |
+| **Transformer fine prior** | - | Improved | Recognizable structure in visual review; distribution gaps remain |
 | DCGAN baseline | - | Partial | Some recognizable anatomy; diversity and fidelity need further assessment |
 
 **DCGAN diversity analysis:** Some DCGAN samples show recognizable anatomy, but
@@ -737,10 +773,11 @@ nearest-neighbour screen are useful warnings, but do not prove absence of
 memorisation. More samples, patient-level coverage analysis, and direct
 generated-to-training comparisons are needed before recommending augmentation.
 
-**Key insight:** The critical factor was not the VQ-VAE architecture (which worked
-excellently for reconstruction) but the **prior's ability to model long-range
-dependencies**. PixelCNN's local receptive field is fundamentally incompatible with
-medical images requiring global anatomical consistency.
+**Interpretation:** The isolation and prior-comparison experiments indicate
+that modelling the fine-code distribution is an important factor in generation
+quality. The limited context of the tested PixelCNN is a plausible explanation,
+but the present experiments do not exclude other architectural or optimisation
+effects.
 
 ## 7. Limitations and Future Work
 
@@ -794,36 +831,38 @@ single score.
 
 Based on the comprehensive experimental investigation, we provide the following phased deployment recommendation:
 
-### Phase 1: Ready for Immediate Deployment
-**VQ-VAE Reconstruction for Data Compression and Archival**
-- **Status:** Production-ready
-- **Performance:** Mean SSIM 0.937 on held-out test data (540/540 samples ≥ 0.6 threshold)
-- **Use cases:** Research into lossy image compression, efficient storage, and fast retrieval
-- **Computational cost:** 8.21s/epoch training, 1.03 GB VRAM
-- **Recommendation:** Deploy for reconstruction-based applications immediately
+### Phase 1: Research evaluation of reconstruction
 
-### Phase 2: Requires Calibration Before Deployment
-**Transformer-Generated Synthetic Cohorts for Research Augmentation**
-- **Status:** Anatomically coherent but statistically distinguishable from real data
-- **Strengths:**
-  - First model producing anatomically realistic hip MRI samples
-  - No memorization detected (minimum pairwise distance 20.9)
-  - High diversity (mean pairwise distance 36.0)
-- **Limitations:**
-  - 12% darker than real scans (mean intensity 0.159 vs 0.180)
-  - 51% bright pixel deficit (4.95% vs 9.69%)
-  - 500× slower than DCGAN (40s vs 0.08s for 500 samples)
-- **Required calibration:**
-  - Post-processing intensity adjustment to match real distribution
-  - Histogram equalization or adversarial distribution matching
-  - Clinical expert validation study
-- **Recommendation:** Suitable for research data augmentation after calibration; not yet ready for clinical training datasets
+The reconstruction results justify further investigation of lossy compression
+and retrieval, but not immediate clinical deployment. The hierarchical model
+achieved mean SSIM of approximately 0.937, while the selected single-level
+campaign model achieved 0.9425 with 540/540 test slices above 0.6. The
+single-level campaign recorded approximately 8.21 seconds per training epoch
+and 1.03 GB peak training VRAM. A deployment decision would require validation
+of clinically relevant details, compression rate and performance on external
+patients; SSIM alone does not establish diagnostic equivalence.
 
-### Phase 3: Not Recommended for Deployment
-**Abandoned Approaches**
-- **PixelCNN prior:** Fundamental architectural limitation (blind spot problem) prevents anatomical coherence. Do not pursue further.
-- **DCGAN baseline:** Some recognizable anatomy, but inconsistent KID scores across seeds and insufficient evidence of coverage. Retain as a baseline for further study.
-- **Latent sampling methods (PCA, mixup):** Not true learned priors; produce unrealistic samples. Not suitable for medical imaging.
+### Phase 2: Validation of synthetic cohorts
+
+Transformer samples showed recognizable structures in the author's review, but
+their mean intensity was 0.159 versus 0.180 in the reference, and their
+bright-pixel fraction was 4.95% versus 9.69%. The mean generated-to-generated
+pairwise distance of 36.0 and minimum of 20.9 describe variation within the
+examined sample set, not privacy relative to training data. Before considering
+research augmentation, the model should be evaluated for patient-level
+distribution coverage, nearest-training similarity and utility in a downstream
+task, together with independent expert review. Intensity calibration is a
+candidate intervention, but should be evaluated rather than assumed to repair
+anatomical errors.
+
+### Phase 3: Alternative baselines
+
+The tested PixelCNN prior did not produce coherent anatomy in the visual
+review, but larger-receptive-field variants remain an open research question.
+The DCGAN produced some recognizable anatomy and remains a useful fast baseline;
+its KID varied across seeds and coverage needs further assessment. PCA and
+mixup alternatives did not yield comparable anatomical quality in the
+reported visual review.
 
 ### Cost-Benefit Analysis
 
@@ -835,10 +874,15 @@ Based on the comprehensive experimental investigation, we provide the following 
 | DCGAN | Some recognizable anatomy | 0.08s | Retain as a baseline |
 
 ### Critical Success Factor
-The investigation revealed that **architectural choices must match task requirements**. Medical image generation demands global anatomical consistency across 64 rows, which requires full self-attention (Transformer) rather than local receptive fields (PixelCNN). This finding has broader implications for medical imaging research: convolutional priors with limited receptive fields are fundamentally unsuitable for anatomical generation tasks, regardless of training duration or hyperparameter tuning.
+The experiments highlight the importance of matching the prior's available
+context to the structure of the data. The Transformer result is consistent
+with a benefit from wider context, but does not prove that self-attention is
+the only viable architecture. A controlled comparison with the unevaluated
+gated PixelCNN would help separate receptive-field effects from other model
+and training differences.
 
 ### Next Steps
-1. **Immediate:** Deploy VQ-VAE reconstruction for compression applications
+1. **Immediate:** Evaluate reconstruction for research compression applications
 2. **Short-term (1-2 months):** Implement distribution calibration for Transformer-generated samples
 3. **Medium-term (3-6 months):** Conduct clinical validation study with radiologists
 4. **Long-term (6-12 months):** Evaluate formal differential privacy bounds for clinical deployment
@@ -851,9 +895,12 @@ The investigation revealed that **architectural choices must match task requirem
 - KID requires torch-fidelity and Inception weights, cached outside Git.
 - Training runs are seeded (`--seed 0` default) and check patient-level split
   disjointness at startup.
-- Operational instructions for running experiments are in `RUNNING.md`.
+- The Quick Start above describes the supplied command-line scripts; the separate
+  hierarchical experiments are not reproduced by those commands.
 
-Local tests: `python -m unittest discover -p 'test_*.py' -v`.
+The historical test suite is not included in the cleaned submission directory.
+The supplied scripts require the dependencies above and access to the dataset
+for end-to-end execution.
 
 ## 10. Artificial Intelligence Usage Disclosure
 
