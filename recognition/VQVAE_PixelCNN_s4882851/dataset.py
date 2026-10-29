@@ -111,6 +111,17 @@ class HipMRISlices(Dataset):
 
     def __init__(self, root=DEFAULT_ROOT, split="train", preload=True, flip_p=0.0,
                  limit=0):
+        """Build the dataset for one split.
+
+        Args:
+            root: dataset root directory (Rangpur course path by default).
+            split: 'train', 'validate' or 'test'.
+            preload: load all slices into one tensor up front (fast training,
+                ~1.7 GB RAM) instead of reading from disk per item.
+            flip_p: probability of a random horizontal flip; 0.0 keeps
+                evaluation deterministic.
+            limit: debug-only cap on the number of slices (0 = all).
+        """
         assert split in SPLITS, f"unknown split '{split}'"
         self.paths = list_split(root, split)
         if limit:
@@ -126,9 +137,15 @@ class HipMRISlices(Dataset):
             self._cache = torch.from_numpy(batch).unsqueeze(1)  # [N,1,256,128]
 
     def __len__(self):
+        """Number of slices in this split."""
         return len(self.paths)
 
     def __getitem__(self, idx):
+        """Return one slice as a float tensor of shape [1, 256, 128].
+
+        Served from the preloaded cache when available, otherwise read from
+        disk. Applies the optional random horizontal flip for augmentation.
+        """
         if self._cache is not None:
             img = self._cache[idx]
         else:
@@ -186,6 +203,16 @@ class HipMRIMasks(Dataset):
 
     def __init__(self, root=DEFAULT_ROOT, split="train", preload=True, limit=0,
                  one_hot=True):
+        """Build the mask dataset for one split.
+
+        Args:
+            root: dataset root directory.
+            split: 'train', 'validate' or 'test'.
+            preload: cache all label slices in memory as int64.
+            limit: debug-only cap on the number of masks (0 = all).
+            one_hot: return one-hot [MASK_CLASSES, 256, 128] masks when True,
+                otherwise the raw integer label grid.
+        """
         assert split in SPLITS, f"unknown split '{split}'"
         self.paths = list_mask_split(root, split)
         if limit:
@@ -200,9 +227,11 @@ class HipMRIMasks(Dataset):
             self._cache = torch.from_numpy(batch)  # [N,256,128] int64
 
     def __len__(self):
+        """Number of masks in this split."""
         return len(self.paths)
 
     def __getitem__(self, idx):
+        """Return one mask, one-hot [MASK_CLASSES, 256, 128] or raw int grid."""
         m = (self._cache[idx] if self._cache is not None
              else torch.from_numpy(load_mask(self.paths[idx])))
         if not self.one_hot:

@@ -1,4 +1,11 @@
-"""Reproducible execution, atomic artifacts, and timestamped batch progress."""
+"""Reproducible execution, atomic artifacts, and timestamped batch progress.
+
+This module holds the cross-cutting utilities shared by ``train.py`` and
+``predict.py``: device selection, seeding, crash-safe file writes, checkpoint
+save/restore, and progress logging. Keeping them here means the training and
+evaluation scripts contain only model logic, and every run is reproducible
+from its saved configuration and RNG state.
+"""
 import hashlib
 import json
 import math
@@ -16,10 +23,22 @@ from modules import (VQVAE, CondPixelCNNPrior, GatedPixelCNNPrior, PixelCNNPrior
 
 
 def log(message):
+    """Print a timestamped, immediately-flushed log line.
+
+    Flushing matters on the HPC cluster: without it, output can sit in a
+    buffer for minutes and make a running job look stalled.
+    """
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
 
 
 def device_for(name="auto"):
+    """Resolve a device string to a ``torch.device``.
+
+    ``"auto"`` picks CUDA when available, otherwise CPU. An explicit
+    ``"cuda"`` request on a machine without CUDA raises rather than silently
+    falling back to CPU, so a misconfigured GPU job fails loudly instead of
+    running 100x slower unnoticed.
+    """
     if name == "auto":
         name = "cuda" if torch.cuda.is_available() else "cpu"
     if name == "cuda" and not torch.cuda.is_available():
@@ -28,6 +47,11 @@ def device_for(name="auto"):
 
 
 def seed_all(seed):
+    """Seed Python, NumPy and PyTorch (CPU and all CUDA devices).
+
+    Called at the start of every run and again before sampling, so a given
+    ``--seed`` reproduces the same training trajectory and the same samples.
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -36,6 +60,12 @@ def seed_all(seed):
 
 
 def atomic_json(value, path):
+    """Write ``value`` as JSON to ``path`` atomically.
+
+    The data is written to a temporary file and then ``os.replace``d into
+    place, so a crash mid-write can never leave a truncated/corrupt JSON
+    file that a later resume would fail to parse.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -44,6 +74,11 @@ def atomic_json(value, path):
 
 
 def atomic_save(value, path):
+    """Save a PyTorch object to ``path`` atomically (temp file + rename).
+
+    Used for model weights and resume checkpoints so an interrupted save
+    cannot destroy the previous good checkpoint.
+    """
     path = Path(path)
     tmp = path.with_suffix(path.suffix + ".tmp")
     torch.save(value, tmp)
@@ -51,6 +86,11 @@ def atomic_save(value, path):
 
 
 def sha256(path):
+    """Return the hex SHA-256 digest of a file, read in 1 MiB blocks.
+
+    Used to fingerprint checkpoints so evaluation can prove the prior was
+    trained on exactly the VQ-VAE being evaluated (see ``predict.py``).
+    """
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for block in iter(lambda: f.read(1024 * 1024), b""):
@@ -59,7 +99,13 @@ def sha256(path):
 
 
 def progress(items, desc, every=30):
-    """Tqdm on interactive terminals, plus durable log lines every 30 seconds."""
+    """Yield items from ``items`` while reporting progress.
+
+    Shows a tqdm bar on interactive terminals and also emits a durable log
+    line (with elapsed time and ETA) at most every ``every`` seconds, so
+    progress survives in the Slurm output file even when no terminal is
+    attached.
+    """
     start = last = time.monotonic()
     total = len(items)
     log(f"{desc}: starting {total} batches")
@@ -74,12 +120,25 @@ def progress(items, desc, every=30):
 
 
 def finite_loss(loss):
+    """Raise ``FloatingPointError`` if ``loss`` is NaN or infinite.
+
+    A diverging loss is caught at the step it happens rather than being
+    written into a checkpoint, which would otherwise poison every later
+    epoch and the saved "best" weights.
+    """
     if not torch.isfinite(loss).all():
         raise FloatingPointError(f"non-finite loss: {loss.detach().cpu()}")
 
 
 def start_run(args):
-    """Refuse accidental overwrites and record the complete run configuration."""
+    """Refuse accidental overwrites and record the complete run configuration.
+
+    Writes ``config.json`` and an initial ``status.json``. If the output
+    directory already holds a run, the stored config is compared against the
+    new one: a mismatch (other than the ignored resume-irrelevant keys) is an
+    error, and reusing a directory without ``--resume`` is refused. This
+    prevents two different experiments silently sharing one output folder.
+    """
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     config = vars(args).copy()
@@ -102,6 +161,14 @@ def start_run(args):
 
 
 def restore(args, models, optimizers, device):
+    """Restore models, optimisers, history and RNG state for ``--resume``.
+
+    Returns ``(epoch, history, best)``. When not resuming, returns epoch 0,
+    empty history, and the correct initial "best" sentinel: ``-inf`` for the
+    VQ-VAE (higher SSIM is better) and ``+inf`` for the prior (lower NLL is
+    better). RNG state is restored too, so a resumed run continues the same
+    random sequence rather than re-seeding.
+    """
     if not args.resume:
         return 0, {}, -math.inf if args.model == "vqvae" else math.inf
     path = Path(args.out) / "latest.pt"
@@ -121,7 +188,12 @@ def restore(args, models, optimizers, device):
 
 
 def checkpoint_epoch(args, epoch, history, best, models, optimizers, extra=None):
-    """Epoch-boundary resume saves weights, optimiser state, history and RNG."""
+    """Epoch-boundary resume saves weights, optimiser state, history and RNG.
+
+    Writes ``latest.pt`` (full resume state), ``history.json``/``history.csv``
+    (per-epoch metrics for plotting) and updates ``status.json`` so an
+    external monitor can see how far the run has progressed.
+    """
     atomic_save({
         "epoch": epoch, "history": history, "best": best,
         "models": {k: m.state_dict() for k, m in models.items()},
@@ -143,7 +215,13 @@ def checkpoint_epoch(args, epoch, history, best, models, optimizers, extra=None)
 
 
 def load_model(path, kind, device):
-    """Instantiate from saved config, preventing ablation shape mismatches."""
+    """Instantiate a model from its saved ``config.json`` and load weights.
+
+    Rebuilding from the stored config (rather than hard-coded defaults)
+    guarantees the architecture matches the checkpoint, so ablation variants
+    (different codebook size, kernel, prior type, ...) load without shape
+    mismatches. Returns ``(model, config)`` with the model in eval mode.
+    """
     config = json.loads((Path(path).parent / "config.json").read_text())
     if kind == "vqvae":
         model = VQVAE(width=config["width"], latent_dim=config["latent_dim"],

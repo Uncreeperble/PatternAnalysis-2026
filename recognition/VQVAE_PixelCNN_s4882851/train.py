@@ -30,6 +30,13 @@ from runtime import (atomic_json, atomic_save, checkpoint_epoch, device_for,
 
 
 def parse_args():
+    """Parse and validate command-line arguments.
+
+    Centralises every hyperparameter (model choice, codebook size, prior
+    type, seeds, ...) so each run is fully described by its saved config.
+    Invalid combinations (non-positive epochs/batch, DCGAN batch < 2 for
+    BatchNorm) are rejected here rather than failing deep in training.
+    """
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model", choices=("vqvae", "prior", "dcgan"), default="vqvae")
     p.add_argument("--data-root", default=DEFAULT_ROOT)
@@ -91,6 +98,12 @@ def validation_ssim(model, val, batch_size):
 
 @torch.no_grad()
 def encode_split(vqvae, data, batch_size, device):
+    """Encode every slice of a split to integer code grids on CPU.
+
+    The VQ-VAE is frozen here; the result is the discrete code dataset the
+    prior is trained on. Runs under ``no_grad`` and returns a CPU tensor so
+    the (large) code set does not occupy GPU memory during prior training.
+    """
     vqvae.eval()
     return torch.cat([vqvae.encode_to_codes(x.to(device)).cpu()
                       for x in progress(torch.split(data._cache, batch_size), "encoding")])
@@ -127,6 +140,12 @@ def one_hot_masks(batch, device):
 
 
 def save_plots(history, out_dir):
+    """Plot every recorded metric against epoch and save ``training_curves.png``.
+
+    ``epoch_seconds`` is excluded from the metric panels (it is a timing
+    diagnostic, not a quality metric). Called each epoch so the curve is
+    always current even if the run is interrupted.
+    """
     keys = [k for k in history if k != "epoch_seconds"]
     fig, axs = plt.subplots(1, len(keys), figsize=(4 * len(keys), 3.5), squeeze=False)
     for ax, key in zip(axs.flat, keys):
@@ -139,6 +158,12 @@ def save_plots(history, out_dir):
 
 
 def finish(args, models, history, best, device, peak, extras=None):
+    """Write the final ``summary.json`` and mark the run completed.
+
+    Records parameter counts, average epoch time, peak VRAM, device name and
+    the selection metric, plus any model-specific ``extras``. This is the
+    machine-readable record the report's resource table is built from.
+    """
     summary = {
         "model": args.model, "epochs": len(history["epoch_seconds"]),
         "seed": args.seed, "debug_limit": args.limit, "batch_size": args.batch_size,
@@ -156,6 +181,15 @@ def finish(args, models, history, best, device, peak, extras=None):
 
 
 def train_vqvae(args, device):
+    """Train the VQ-VAE, selecting the best checkpoint on validation SSIM.
+
+    Each epoch optimises reconstruction (MSE or L1) plus the VQ loss, then
+    evaluates patient-disjoint validation SSIM. The best-SSIM weights are
+    saved atomically; per-epoch history, plots and a resumable checkpoint are
+    written every epoch. An optional data-based codebook initialisation
+    (``--codebook-init data``) is a preplanned collapse fallback that uses
+    only training encoder outputs.
+    """
     train = HipMRISlices(args.data_root, "train", limit=args.limit)
     val = HipMRISlices(args.data_root, "validate", limit=max(1, args.limit // 4) if args.limit else 0)
     model = VQVAE(width=args.width, latent_dim=args.latent_dim,
@@ -216,6 +250,16 @@ def train_vqvae(args, device):
 
 
 def train_prior(args, device, vqvae):
+    """Train an autoregressive prior over the frozen VQ-VAE codes.
+
+    Encodes the train/validation splits once, then trains the selected prior
+    type (PixelCNN, gated, conditioned, or Transformer) by minimising code
+    cross-entropy, selecting the best checkpoint on validation NLL. For
+    conditional priors the segmentation masks are downsampled to the code
+    grid and paired with the codes in one dataset so shuffling cannot
+    separate them. A gated prior whose receptive field cannot span the grid
+    is rejected up front.
+    """
     train = HipMRISlices(args.data_root, "train", limit=args.limit)
     val = HipMRISlices(args.data_root, "validate", limit=max(1, args.limit // 4) if args.limit else 0)
     train_codes = encode_split(vqvae, train, args.batch_size, device)
@@ -279,6 +323,12 @@ def train_prior(args, device, vqvae):
                    if val_masks is not None else torch.split(val_codes, args.batch_size))
 
     def batch_loss(batch):
+        """Compute the prior loss for one batch, with or without masks.
+
+        Returns ``(loss, n)`` where ``n`` is the batch size, so the caller can
+        form a correctly weighted epoch average (including a short last
+        batch).
+        """
         if train_masks is None:
             return model.loss(batch.to(device)), len(batch)
         codes, mask = batch
@@ -318,6 +368,14 @@ def train_prior(args, device, vqvae):
 
 
 def train_dcgan(args, device):
+    """Train the DCGAN baseline with the standard alternating G/D updates.
+
+    Uses label smoothing (real target 0.9), spectral-normalised discriminator
+    and resize-convolution generator. A fixed noise batch is sampled each
+    epoch (with its own RNG so monitoring does not perturb training) to track
+    across-sample diversity and save an uncurated sample grid. Selection is
+    the predeclared final epoch, never test KID.
+    """
     train = HipMRISlices(args.data_root, "train", limit=args.limit)
     netG = DCGenerator(noise_dim=args.noise_dim, width=args.gan_width).to(device)
     netD = DCDiscriminator(width=args.disc_width).to(device)
@@ -383,6 +441,12 @@ def train_dcgan(args, device):
 
 
 def main():
+    """Entry point: set up the run, verify splits, and dispatch to a trainer.
+
+    Loads the frozen VQ-VAE when training a prior (and pins the prior's
+    architecture to that checkpoint's config), records the run, re-checks
+    patient-disjoint splits, and writes a failure status if training raises.
+    """
     args = parse_args()
     device = device_for(args.device)
     vqvae = None

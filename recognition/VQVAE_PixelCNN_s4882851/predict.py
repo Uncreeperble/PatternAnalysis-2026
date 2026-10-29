@@ -30,6 +30,13 @@ from runtime import (atomic_json, atomic_save, device_for, load_model, log,
 
 
 def parse_args():
+    """Parse and validate evaluation arguments.
+
+    Rejects invalid settings up front: non-positive sample/batch/thread
+    counts, non-positive temperature, duplicate sample seeds, and
+    ``--skip-kid`` without ``--limit`` (so KID can only be skipped in a
+    non-official smoke test, never in a reported run).
+    """
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--data-root", default=DEFAULT_ROOT)
     p.add_argument("--vqvae", required=True)
@@ -57,10 +64,20 @@ def parse_args():
 
 
 def to_rgb_uint8(images, device):
+    """Convert [N,1,H,W] float images in [0,1] to [N,3,H,W] uint8 RGB.
+
+    KID's Inception backbone expects 3-channel uint8 input, so the single
+    grayscale channel is replicated three times.
+    """
     return (images.clamp(0, 1) * 255).to(torch.uint8).repeat(1, 3, 1, 1).to(device)
 
 
 def save_grid(images, path, title, cols=8):
+    """Save up to 64 images as an uncurated grid figure to ``path``.
+
+    Images are shown in a fixed [0, 1] display range so brightness
+    differences between panels are real, not per-panel auto-scaled.
+    """
     n = min(len(images), 64)
     rows = (n + cols - 1) // cols
     fig, axs = plt.subplots(rows, cols, figsize=(1.8 * cols, 2.3 * rows), squeeze=False)
@@ -76,6 +93,12 @@ def save_grid(images, path, title, cols=8):
 
 @torch.no_grad()
 def recon_scores(model, data, batch_size, device):
+    """Compute per-slice reconstruction SSIM and codebook usage on a split.
+
+    Returns ``(scores, code_histogram, sample_codes, sample_recons)``: the
+    per-slice SSIM array, the code-index histogram (for perplexity/codes
+    used), and the first eight codes/reconstructions for a figure.
+    """
     scores, hist, grid_codes, grid_recons = [], torch.zeros(model.quantizer.num_codes), None, None
     for x in progress(torch.split(data._cache, batch_size), "reconstruction SSIM and codes"):
         recon, _, _, codes = model(x.to(device))
@@ -111,6 +134,11 @@ def nearest_train_matches(images, train, device, chunk=32, reference_chunk=512):
 
 
 def distance_summary(dist, pixels):
+    """Summarise nearest-neighbour L2 distances as L2 and per-pixel RMSE.
+
+    ``pixels`` is the number of pixels per image, so ``dist / sqrt(pixels)``
+    is the RMSE. Returns means, the minimum, and RMSE quantiles.
+    """
     rmse = dist / pixels ** 0.5
     return {"l2_mean": float(dist.mean()), "l2_min": float(dist.min()),
             "rmse_mean": float(rmse.mean()),
@@ -119,12 +147,24 @@ def distance_summary(dist, pixels):
 
 
 def sync(device):
+    """Block until all queued CUDA work finishes (no-op on CPU).
+
+    Needed before starting/stopping timers so measured generation time
+    reflects completed work rather than just kernel launches.
+    """
     if device.type == "cuda":
         torch.cuda.synchronize()
 
 
 @torch.no_grad()
 def generate(args, model, decoder, name, seed, device, out):
+    """Generate ``n_samples`` images for one model and seed, with caching.
+
+    Reuses a previously saved sample cache when present (so re-running
+    evaluation does not resample). Records wall-clock time and peak VRAM,
+    checks the output is finite, saves the samples and a fixed-seed grid,
+    and returns ``(samples, timing_info)``.
+    """
     cache = out / f"{name}_seed{seed}.pt"
     timing = out / f"{name}_seed{seed}_timing.json"
     if cache.exists() and timing.exists():
@@ -142,6 +182,7 @@ def generate(args, model, decoder, name, seed, device, out):
         if name == "vqvae_prior":
             last = time.monotonic()
             def callback(done, total):
+                """Log sampling progress at most every 30 s (or on completion)."""
                 nonlocal last
                 now = time.monotonic()
                 if now - last >= 30 or done == total:
@@ -173,6 +214,12 @@ def generate(args, model, decoder, name, seed, device, out):
 
 
 def kid_scores(real, fake, device, seed, batch_size):
+    """Compute Kernel Inception Distance between real and generated images.
+
+    KID is a distribution-level metric (lower is better). The Inception
+    import/weights download is deliberately triggered here so it happens
+    before the expensive GPU work. Returns mean, subset std and settings.
+    """
     # Import/download is deliberately preflighted before expensive GPU jobs.
     from torchmetrics.image.kid import KernelInceptionDistance
     subset = min(100, len(real), len(fake))
@@ -191,6 +238,12 @@ def kid_scores(real, fake, device, seed, batch_size):
 
 @torch.no_grad()
 def interpolation_figure(vqvae, prior_samples, nearest_images, gan, noise, device, out):
+    """Save latent-interpolation grids for the VQ-VAE and (optionally) the GAN.
+
+    Interpolates in the quantised latent space between a generated sample and
+    its nearest real slice, and between two GAN noise vectors. This is a
+    qualitative screening figure only; it is not a privacy guarantee.
+    """
     fig, axs = plt.subplots(2 + int(gan is not None), 5, figsize=(10, 6), squeeze=False)
     for row in range(2):
         source = prior_samples[row:row+1].to(device)
@@ -218,6 +271,16 @@ def interpolation_figure(vqvae, prior_samples, nearest_images, gan, noise, devic
 
 @torch.no_grad()
 def evaluate(args, out, device):
+    """Run the full held-out evaluation and write ``results.json``.
+
+    Steps: verify patient-disjoint splits, load the VQ-VAE/prior/DCGAN
+    (checking the prior matches the VQ-VAE by SHA-256), score reconstruction
+    SSIM and codebook use, calibrate a nearest-neighbour screen on the
+    validation split, then for each model generate fixed-seed samples and
+    report nearest-training distances, exact-match checks, diversity, KID and
+    distance-selected failure candidates. Results are written incrementally
+    so a crash still leaves partial output.
+    """
     log(f"patient-disjoint split check: {verify_patient_splits(args.data_root)}")
     data = HipMRISlices(args.data_root, args.split, limit=args.limit)
     train = HipMRISlices(args.data_root, "train", limit=args.limit)
@@ -322,6 +385,12 @@ def evaluate(args, out, device):
 
 
 def main():
+    """Entry point: validate config, guard against mixed outputs, run evaluation.
+
+    Refuses to reuse an output directory whose saved config differs, skips
+    work if ``results.json`` already exists, and records running/completed/
+    failed status so an interrupted evaluation is visible.
+    """
     args = parse_args()
     device = device_for(args.device)
     torch.set_num_threads(args.threads)
