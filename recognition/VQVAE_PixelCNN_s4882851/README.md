@@ -2,7 +2,11 @@
 
 **Student:** Ben Evans (s4882851) &mdash; Hard difficulty &mdash; PyTorch
 
-> **Status: COMPLETE.** Final submission for COMP3710 Project 2.4 (Oct 30, 2026).
+> **Final submission for COMP3710 Project 2.4 (Oct 30, 2026).**
+
+## Abstract
+
+This project develops a generative model for synthetic prostate MRI slices using a hierarchical VQ-VAE-2 architecture combined with a Transformer-based prior. Medical imaging research is constrained by patient privacy regulations and limited data availability. The final model achieves excellent reconstruction quality (mean SSIM 0.937 on held-out test data) and successfully generates anatomically coherent synthetic samples. After extensive experimentation, we discovered that PixelCNN priors fail for medical images due to limited receptive fields (~19 rows in a 64-row grid), preventing them from capturing long-range anatomical dependencies. Replacing the fine-level prior with a causal Transformer (full self-attention over 2,048 code positions) solved this fundamental limitation, producing the first anatomically realistic samples with mean intensity 0.159 (88% of training data) and no evidence of memorization. The investigation tested eight different approaches including hierarchical priors, conditioning strategies, latent space sampling, and architectural modifications. Only the Transformer prior succeeded, demonstrating that architectural choices must match task requirements: medical image generation demands global anatomical consistency that local convolutional models cannot provide.
 
 ## 1. Problem and description
 
@@ -731,3 +735,78 @@ line by line and which parts were tested only.]
 - Binkowski, M., et al. (2018). Demystifying MMD GANs (KID). ICLR.
 - Structure of the report was informed by the 2025 COMP3710 VQ-VAE README by
   S. Subramaniam (PatternAnalysis-2025, s4858817_VQVAE). No text was copied.
+
+---
+
+## Appendix A: Complete Feasibility Review (As Submitted)
+
+*This is the exact 1-page feasibility review submitted before experiments began.*
+
+### COMP3710 Project 2.4: Feasibility Review
+**The Fidelity--Memorisation--Privacy Dilemma in Synthetic Medical Imaging**  
+Hard VQ-VAE with PixelCNN Prior | DCGAN Baseline
+
+---
+
+### 1. User Need, Scope & Acceptance Criteria
+
+Synthetic medical images could support research when real patient data is limited or cannot be shared due to privacy constraints. However, generated images must preserve anatomical structure without simply reproducing training examples. This project investigates these trade-offs using 2D HipMRI slices, comparing a VQ-VAE with a PixelCNN prior against a DCGAN baseline.
+
+The project will assess the following criteria:
+
+- **Reconstruction fidelity:** achieve mean SSIM ≥ 0.6 between held-out images and their corresponding VQ-VAE reconstructions.
+
+- **Generation:** generate 500 samples from each unconditional model and compare their Kernel Inception Distance (KID) against held-out real images. Lower KID indicates greater similarity in feature distributions.
+
+- **Diversity:** report codebook utilisation and distinct entries used; assess sample variety and distribution coverage using generated grids and feature-space metrics.
+
+- **Memorisation risk:** check for exact duplicates and compare generated-to-training image similarity against held-out real-to-training similarities. Investigate unusually similar samples; this is a screening test, not a privacy guarantee.
+
+- **Computational feasibility:** record peak GPU memory, training time and generation time. Use a provisional training budget of 3 hours and target generation of 500 images within 15 minutes, with 1 hour as an upper target, subject to available hardware.
+
+### 2. Model Choice & Course Concepts
+
+The main model is a VQ-VAE trained on the provided HipMRI dataset. Its encoder maps images to latent features, which are quantised to learned codebook entries; its decoder reconstructs images from these discrete representations (van den Oord et al., 2017).
+
+A VQ-VAE alone does not learn how to sample new latent grids. A PixelCNN autoregressive prior will therefore learn the distribution of code indices, allowing new grids to be sampled and decoded into synthetic slices. A DCGAN (Radford et al., 2016) provides an alternative unconditional generation baseline: its convolutional generator creates images from random noise, while its discriminator distinguishes generated from real images. It offers a useful architectural comparison and fast sampling, although adversarial training may be unstable.
+
+The course content has covered a practical implementation of a VQ-VAE and a GAN model, as well as their concepts, and will be used to underpin this experiment.
+
+### 3. Preliminary Feasibility Evidence
+
+**Baseline configuration.** The VQ-VAE follows the architecture and settings of van den Oord et al. (2017): two 4×4 stride-2 convolutions (a 64×32 latent grid), two residual blocks, a 512-entry codebook of dimension 64, β=0.25, straight-through gradients and Adam at 2×10⁻⁴, with the width reduced to 128 channels. It was implemented directly from the paper and left untuned, as were the masked-convolution PixelCNN prior and the DCGAN. A previous-year COMP3710 VQ-VAE on this dataset (PatternAnalysis-2025, s4858817) is cited only as external evidence: it reconstructs without a generative prior and reached validation SSIM 0.757, with codebook perplexity rising from ~5 to ~100 over ~50 epochs.
+
+**Data audit (Rangpur, keras_slices_data).** The 2D data contain 12,660 slices: 11,460 train (31 patients, 191 scans), 660 validation (4 patients) and 540 test (3 patients), a 90.5/5.2/4.3% slice split with zero patient overlap between splits. Images are 256×128 float32 with paired, index-aligned masks; one scan (patient 019, week 1) is 256×144 and must be cropped. Raw intensities span 0--1212 (median slice maximum 397), so per-slice normalisation is needed. Masks carry six labels; the prostate (label 5) is only ~0.4% of pixels. Loading runs at ~230 slices/s; the full set is ~1.7 GB in RAM.
+
+**GPU smoke test (A100-40GB, 5 epochs).** The VQ-VAE (1.18M parameters) trained at 6.9 s/epoch and 3.39 GB peak, reaching held-out mean SSIM 0.624 (78% of slices ≥0.6; MSE 0.0043), though reconstructions are blurry. Only 13/512 codes were used (perplexity 6.8), resembling the early-epoch collapse reported in the cited work, so longer training may recover utilisation but must be verified. A 2.13M-parameter PixelCNN on the frozen codes cut cross-entropy from 6.24 (uniform) to 0.63, an easy target while only 13 codes are active; measured sampling cost extrapolates to 2.8 min (fp32; 1.4 min bf16) for 500 images, inside the 15-minute target. A 3-epoch DCGAN (3.2M/2.8M parameters, 3.6 s/epoch, 1.46 GB) generates 500 images in 0.12 s but gives banded, near-identical samples (pixel std 0.067 vs 0.130 real). The pipeline fits the budget; sample quality is the open risk.
+
+![Feasibility figure](../../feasibility_fig.png)
+
+*Fig. 1. Real vs VQ-VAE reconstruction pairs (blurry, SSIM 0.62); DCGAN samples (banded, near-identical).*
+
+### 4. Experimental Plan & Next Steps
+
+**VQ-VAE:**
+- Retrain for 50--100 epochs with validation-SSIM checkpointing and per-epoch perplexity, testing whether the 13/512 collapse is transient.
+- If utilisation stays low: EMA codebook updates, k-means initialisation, dead-code reset; sweep K∈{256,512}, D∈{64,128} and β.
+- To reduce blur: add an L1/SSIM loss and compare 4× (2048 tokens) with 8× downsampling (512 tokens: ~4× cheaper PixelCNN sampling, possible detail loss). Select on validation SSIM, MSE, utilisation.
+
+**PixelCNN, DCGAN and evaluation:**
+- Freeze the chosen VQ-VAE, encode all splits, train PixelCNN (try gated blocks; vary depth, width, receptive field) selected on validation NLL; sample with temperature.
+- DCGAN: remove banding (resize-convolution upsampling, spectral norm, label smoothing), train 50+ epochs; WGAN-GP only if unstable.
+- 500 samples per model: KID vs held-out real images, codebook use, fixed-seed grids, nearest-training-neighbour audit. Select on validation, report test once; with 4 validation and 3 test patients, report per-patient spread and limited statistical power. Log time and peak GPU memory.
+
+### 5. Risks, Budget & Fallback
+
+**Risks:** Blurry reconstructions, codebook under-utilisation, poor generated samples, DCGAN instability, memorisation and limited computing resources.
+
+- **Poor fidelity or codebook use:** investigate loss weighting, model capacity, downsampling and codebook settings.
+- **Memorisation:** inspect suspicious matches; test early stopping, regularisation or anatomically appropriate augmentation, then reassess fidelity.
+- **Unstable generation:** tune learning rates and model settings; document persistent mode collapse or poor sample quality.
+- **Resource constraints:** reduce model size, latent-grid resolution or training duration. If PixelCNN cannot be completed, report reconstruction results separately and acknowledge that unconditional generation remains unverified.
+
+### References
+
+van den Oord, A., Vinyals, O. & Kavukcuoglu, K. (2017). *Neural Discrete Representation Learning*. NeurIPS.
+
+Radford, A., Metz, L. & Chintala, S. (2016). *Unsupervised Representation Learning with Deep Convolutional Generative Adversarial Networks*. ICLR.
