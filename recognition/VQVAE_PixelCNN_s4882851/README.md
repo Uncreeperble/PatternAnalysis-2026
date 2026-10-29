@@ -284,8 +284,10 @@ repository.
 | Labels | Six classes; prostate (label 5) about 0.4% of pixels | Segmentation is not used by these models; the class imbalance is noted for future work |
 | Load speed | about 230 slices/s; about 1.7 GB in RAM | Full set kept in memory |
 
-The audit figures are in `data_exploration/` in the project folder and will be
-added to this section in a later commit.
+The audit was performed with a separate exploration script; its summary
+statistics are the source of the table above. The exploration figures are not
+included in this repository, which contains only the model code and the figures
+referenced in this report.
 
 ### 4.3 Preprocessing
 
