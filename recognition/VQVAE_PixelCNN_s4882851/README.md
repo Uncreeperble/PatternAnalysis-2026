@@ -387,9 +387,10 @@ the smoke tests were 1.18 M (VQ-VAE), 2.13 M (PixelCNN prior), and 3.2 M / 2.8 M
 **Side-by-side comparison.** Visual inspection of the uncurated grids shows that
 VQ-VAE + PixelCNN prior samples lack recognizable hip anatomy: the bone structures
 are absent or distorted, and the tissue boundaries do not match real MRI patterns.
-DCGAN samples show checkerboard artifacts and banding. Both models produce samples
-that are visibly distinct from real hip scans. Diversity is present (samples differ
-from each other), but the samples do not represent plausible anatomy.
+Some DCGAN samples show recognizable anatomy, although artifacts and variation
+in quality remain visible. Visual resemblance is not sufficient to establish
+clinical fidelity or adequate diversity, and the quantitative comparisons in
+Sections 6.1 and 6.7 provide important context.
 
 **Closest training pairs.** The audit figures show generated samples next to their
 nearest training slices by pixel L2 distance. In all cases, the generated samples
@@ -450,9 +451,10 @@ contrast, looks like hip anatomy to the author.
 
 ## 6.5 Generation Failure Investigation
 
-While the VQ-VAE achieved excellent reconstruction (SSIM 0.9425), **all generation
-methods produced anatomically unrealistic samples**. This section documents the
-extensive investigation into why generation failed and what was attempted to fix it.
+While the selected VQ-VAE achieved excellent reconstruction (SSIM 0.9425),
+the initial PixelCNN-based generation produced anatomically unrealistic samples.
+This section documents the investigation into that failure, the attempted fixes,
+and the subsequent Transformer results.
 
 ### 6.5.1 Initial Observation: Statistical Mismatch
 
@@ -556,7 +558,7 @@ After identifying the blind spot problem, multiple alternative approaches were t
 - **Result:** Training completed (val NLL 4.05), but generation not evaluated
   due to time constraints. The Transformer approach (below) already solved the problem.
 
-**6. Transformer fine prior (Oct 29, Experiment 6) ✅ SUCCESS**
+**6. Transformer fine prior (Oct 29, Experiment 6): SUCCESS**
 - Replaced fine PixelCNN with causal Transformer over 2,048 tokens
 - Full self-attention eliminates blind spot problem (see section 2.4)
 - 6 layers, 8 heads, embedding dim 256, 40 epochs training
@@ -604,13 +606,31 @@ quality.
 
 ![VQ-VAE training curves](figures/vqvae_training_curves.png)
 
-*VQ-VAE training progression: reconstruction loss, codebook loss, and validation
-SSIM over 100 epochs. SSIM plateaus around epoch 60.*
+*VQ-VAE-2 training and validation loss (log scale) and validation SSIM over 100
+epochs, plotted from the saved training history.*
+
+Validation SSIM rises from 0.645 in epoch 1 to 0.936 at epoch 100, while
+validation loss falls from 0.0725 to 0.00133. The later improvements are much
+smaller than the initial gains, suggesting diminishing returns from further
+reconstruction training. These curves assess reconstruction, not the quality of
+unconditional generation; the strong reconstruction result does not establish
+that the sampled latent codes follow the true data distribution.
 
 ![Prior training curves](figures/prior_training_curves.png)
 
-*PixelCNN prior training: cross-entropy loss decreases steadily but generated
-sample quality does not improve correspondingly.*
+*Fine PixelCNN prior training and validation negative log-likelihood (NLL), in
+nats per code, over 150 epochs, plotted from the saved prior history.*
+
+Training NLL decreases from 4.956 to 3.645, while validation NLL decreases from
+4.845 to 4.036. The gap at the final epoch is approximately 0.39 nats per code:
+training continues to improve more than validation, which is consistent with
+overfitting or limited generalisation. These are teacher-forced code-prediction
+scores, not direct measures of image realism. During sampling, predictions are
+conditioned on previously sampled rather than ground-truth codes, so errors can
+accumulate. Together with the isolation experiment, this explains why a
+decreasing NLL can coexist with anatomically poor generated images. The saved
+history does not separately record the reconstruction and codebook losses, so
+they are not presented as separate curves.
 
 ### 6.6 Transformer Generation Quality Analysis
 
@@ -695,16 +715,27 @@ numbers that fail statistical tests. Similarly, our generator produces
 
 | Approach | Reconstruction | Generation | Notes |
 |---|---|---|---|
-| VQ-VAE (single level) | SSIM 0.93 | ❌ Failed | Codebook collapse initially |
-| VQ-VAE-2 (hierarchical) | SSIM 0.94 | ❌ Failed | Better reconstruction, same generation issues |
-| PixelCNN prior | - | ❌ Failed | Blind spot prevents anatomical coherence |
-| Transformer coarse prior | - | ❌ Partial | Improved global structure, fine prior still fails |
-| Conditioned fine prior | - | ❌ Failed | Conditioning doesn't fix receptive field |
-| Latent sampling (PCA, mixup) | - | ❌ Failed | Not true learned priors |
-| **Transformer fine prior** | - | ✅ **Success** | Full attention solves blind spot |
-| DCGAN baseline | - | ⚠️ Partial | Realistic anatomy but very low diversity (pixel std 0.0028 vs 0.130 real) |
+| VQ-VAE (single level) | SSIM 0.93 | Failed | Codebook collapse initially |
+| VQ-VAE-2 (hierarchical) | SSIM 0.94 | Failed | Better reconstruction, same generation issues |
+| PixelCNN prior | - | Failed | Blind spot prevents anatomical coherence |
+| Transformer coarse prior | - | Partial | Improved global structure, fine prior still fails |
+| Conditioned fine prior | - | Failed | Conditioning doesn't fix receptive field |
+| Latent sampling (PCA, mixup) | - | Failed | Not true learned priors |
+| **Transformer fine prior** | - | **Success** | Full attention solves blind spot |
+| DCGAN baseline | - | Partial | Some recognizable anatomy; diversity and fidelity need further assessment |
 
-**DCGAN diversity analysis:** While DCGAN samples showed recognizable hip anatomy (unlike PixelCNN), they suffered from severe mode collapse with across-sample pixel standard deviation of only 0.0028 compared to 0.130 for real scans—samples were nearly identical to each other. No memorization was detected (0 exact training matches, all samples passed validation screen), but the lack of diversity makes DCGAN unsuitable for data augmentation despite anatomical plausibility.
+**DCGAN diversity analysis:** Some DCGAN samples show recognizable anatomy, but
+visual plausibility alone does not establish that the generator covers the full
+range of patient anatomy. In the separate one-epoch, 32-sample smoke test,
+across-sample pixel standard deviation was 0.0028, with no exact uint8 training
+matches. This smoke-test statistic must not be attributed to the 50-epoch final
+DCGAN. The earlier three-epoch feasibility test reported 0.067 versus 0.130
+for real slices. The final campaign's KID varied substantially across its two
+seeds (0.489 and 0.283), so a single favourable grid is not enough to establish
+consistent distributional fidelity or diversity. Exact-match checks and the
+nearest-neighbour screen are useful warnings, but do not prove absence of
+memorisation. More samples, patient-level coverage analysis, and direct
+generated-to-training comparisons are needed before recommending augmentation.
 
 **Key insight:** The critical factor was not the VQ-VAE architecture (which worked
 excellently for reconstruction) but the **prior's ability to model long-range
@@ -712,6 +743,27 @@ dependencies**. PixelCNN's local receptive field is fundamentally incompatible w
 medical images requiring global anatomical consistency.
 
 ## 7. Limitations and Future Work
+
+The central limitation is that reconstruction and generation answer different
+questions. A reconstruction starts from the codes of a real input; an
+unconditional generator must also reproduce the distribution of those codes.
+High reconstruction SSIM therefore supports the capacity of the encoder and
+decoder, but cannot by itself establish that synthetic samples are clinically
+faithful. Likewise, qualitative resemblance is an observation by the author,
+not a blinded clinical assessment. The brightness and bright-pixel differences
+in Section 6.6.3 are particularly important because a downstream model could
+learn these systematic artefacts instead of clinically relevant anatomy.
+
+The small patient-disjoint evaluation set makes the reported results sensitive
+to individual patients and acquisition variation. Slices from the same patient
+are correlated, so hundreds of slices should not be treated as hundreds of
+independent patients. KID provides a distribution-level comparison but uses
+features trained on natural images; it may miss medically important errors.
+Similarly, nearest-neighbour distances are affected by brightness and do not
+constitute a formal privacy guarantee. A larger, external cohort, patient-level
+uncertainty estimates, blinded expert assessment and a dedicated privacy audit
+would address different aspects of these limitations rather than relying on a
+single score.
 
 **Current Limitations:**
 - Unpaired generated-slice SSIM cannot reach 0.6 even for real scans, so the
@@ -746,7 +798,7 @@ Based on the comprehensive experimental investigation, we provide the following 
 **VQ-VAE Reconstruction for Data Compression and Archival**
 - **Status:** Production-ready
 - **Performance:** Mean SSIM 0.937 on held-out test data (540/540 samples ≥ 0.6 threshold)
-- **Use cases:** Lossless medical image compression, efficient storage, fast retrieval
+- **Use cases:** Research into lossy image compression, efficient storage, and fast retrieval
 - **Computational cost:** 8.21s/epoch training, 1.03 GB VRAM
 - **Recommendation:** Deploy for reconstruction-based applications immediately
 
@@ -770,17 +822,17 @@ Based on the comprehensive experimental investigation, we provide the following 
 ### Phase 3: Not Recommended for Deployment
 **Abandoned Approaches**
 - **PixelCNN prior:** Fundamental architectural limitation (blind spot problem) prevents anatomical coherence. Do not pursue further.
-- **DCGAN baseline:** Banding artifacts, no anatomical structure, inconsistent KID scores across seeds. Abandon this approach.
+- **DCGAN baseline:** Some recognizable anatomy, but inconsistent KID scores across seeds and insufficient evidence of coverage. Retain as a baseline for further study.
 - **Latent sampling methods (PCA, mixup):** Not true learned priors; produce unrealistic samples. Not suitable for medical imaging.
 
 ### Cost-Benefit Analysis
 
 | Approach | Anatomical Quality | Speed (500 samples) | Recommendation |
 |---|---|---|---|
-| VQ-VAE Reconstruction | ✅ Excellent (SSIM 0.937) | N/A | **Deploy now** |
-| VQ-VAE + Transformer | ✅ Coherent (first success) | 40s | **Deploy after calibration** |
-| VQ-VAE + PixelCNN | ❌ Failed | 40s | **Abandon** |
-| DCGAN | ❌ Failed | 0.08s | **Abandon** |
+| VQ-VAE Reconstruction | Excellent (SSIM 0.937) | N/A | Research evaluation |
+| VQ-VAE + Transformer | Coherent in visual review | Not measured here | Further validation |
+| VQ-VAE + PixelCNN | Poor in visual review | 40s | Further study |
+| DCGAN | Some recognizable anatomy | 0.08s | Retain as a baseline |
 
 ### Critical Success Factor
 The investigation revealed that **architectural choices must match task requirements**. Medical image generation demands global anatomical consistency across 64 rows, which requires full self-attention (Transformer) rather than local receptive fields (PixelCNN). This finding has broader implications for medical imaging research: convolutional priors with limited receptive fields are fundamentally unsuitable for anatomical generation tasks, regardless of training duration or hyperparameter tuning.
@@ -943,7 +995,7 @@ The course content has covered a practical implementation of a VQ-VAE and a GAN 
 
 **GPU smoke test (A100-40GB, 5 epochs).** The VQ-VAE (1.18M parameters) trained at 6.9 s/epoch and 3.39 GB peak, reaching held-out mean SSIM 0.624 (78% of slices ≥0.6; MSE 0.0043), though reconstructions are blurry. Only 13/512 codes were used (perplexity 6.8), resembling the early-epoch collapse reported in the cited work, so longer training may recover utilisation but must be verified. A 2.13M-parameter PixelCNN on the frozen codes cut cross-entropy from 6.24 (uniform) to 0.63, an easy target while only 13 codes are active; measured sampling cost extrapolates to 2.8 min (fp32; 1.4 min bf16) for 500 images, inside the 15-minute target. A 3-epoch DCGAN (3.2M/2.8M parameters, 3.6 s/epoch, 1.46 GB) generates 500 images in 0.12 s but gives banded, near-identical samples (pixel std 0.067 vs 0.130 real). The pipeline fits the budget; sample quality is the open risk.
 
-![Feasibility figure](../../feasibility_fig.png)
+![Feasibility figure](figures/feasibility_fig.png)
 
 *Fig. 1. Real vs VQ-VAE reconstruction pairs (blurry, SSIM 0.62); DCGAN samples (banded, near-identical).*
 
