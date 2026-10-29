@@ -887,35 +887,17 @@ This appendix contains supplementary figures from the experimental investigation
 
 *Figure A.2: Visual comparison of PixelCNN's limited receptive field (~19 rows) versus Transformer's full attention over all 2,048 code positions.*
 
-### A.3 Failure vs Success Comparison
-
-![Failure vs success](figures/failure_vs_success_comparison.png)
-
-*Figure A.3: Direct comparison between failed PixelCNN samples (left) and successful Transformer samples (right), highlighting the anatomical coherence achieved by full self-attention.*
-
-### A.4 Labeled Real vs Generated Comparison
-
-![Labeled comparison](figures/labeled_real_vs_generated.png)
-
-*Figure A.4: Annotated comparison showing anatomical landmarks (femoral heads, pelvic bones, tissue boundaries) in real scans versus Transformer-generated samples.*
-
-### A.5 Transformer Sample Grid
+### A.3 Transformer Sample Grid
 
 ![Transformer sample grid](figures/transformer_samples_grid.png)
 
-*Figure A.5: Extended grid of Transformer-generated samples (32 samples) demonstrating diversity and anatomical consistency across multiple generations.*
+*Figure A.3: Extended grid of Transformer-generated samples (32 samples) demonstrating diversity and anatomical consistency across multiple generations.*
 
-### A.6 Reconstruction Grid
-
-![Reconstruction grid](figures/reconstruction_grid.png)
-
-*Figure A.6: Grid of VQ-VAE-2 reconstructions showing consistent high-quality reconstruction across diverse anatomical variations in the test set.*
-
-### A.7 Distribution Analysis (Experiment 6)
+### A.4 Distribution Analysis (Experiment 6)
 
 ![Distribution analysis](figures/exp6_distribution_analysis.png)
 
-*Figure A.7: Detailed statistical analysis from Experiment 6 (Transformer prior) showing intensity distributions, bright pixel fractions, and pairwise distance metrics.*
+*Figure A.4: Detailed statistical analysis from Experiment 6 (Transformer prior) showing intensity distributions, bright pixel fractions, and pairwise distance metrics.*
 
 ---
 
