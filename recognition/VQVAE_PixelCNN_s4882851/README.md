@@ -24,6 +24,31 @@ This work makes the following contributions to synthetic medical image generatio
 
 6. **Reproducible experimental methodology**: All experiments seeded, patient-disjoint splits verified at runtime, validation-based selection, and comprehensive documentation of what worked and what didn't.
 
+## Quick Start
+
+**Running the code:**
+
+```bash
+# Train VQ-VAE-2
+python train.py --model vqvae2 --epochs 100 --seed 0
+
+# Train Transformer prior
+python train.py --model transformer_prior --vqvae_checkpoint path/to/vqvae.pt --epochs 40
+
+# Generate samples
+python predict.py --model transformer --checkpoint path/to/prior.pt --num_samples 500
+```
+
+**Key files:**
+- `modules.py` - Model architectures (VQ-VAE-2, Transformer prior, DCGAN)
+- `dataset.py` - HipMRI data loading with patient-disjoint splits
+- `train.py` - Training script with validation-based checkpointing
+- `predict.py` - Generation and evaluation
+
+**Requirements:** PyTorch 2.13+, CUDA-capable GPU (A100 recommended), HipMRI dataset
+
+Full deployment details and experimental methodology are described in Section 8 (Recommendation for the project manager) and Section 9 (Dependencies and reproducibility).
+
 ## 1. Problem and description
 
 Medical imaging research is limited by patient privacy rules (HIPAA, GDPR) and
@@ -683,50 +708,6 @@ numbers that fail statistical tests. Similarly, our generator produces
 excellently for reconstruction) but the **prior's ability to model long-range
 dependencies**. PixelCNN's local receptive field is fundamentally incompatible with
 medical images requiring global anatomical consistency.
-
-### 6.8 Task Sheet Requirements Verification
-
-This project addresses all mandatory requirements from COMP3710 Project 2.4 (Section 2.4: Image Generation):
-
-**✅ Baseline Implementation & Comparison (Required):**
-- DCGAN baseline implemented and trained (Section 5.5, 6.1)
-- Direct comparison on identical test split (Section 6.1: KID scores, generation time)
-- Both models evaluated on same 540 held-out test slices
-
-**✅ Quantitative Benchmarking (Required):**
-- **SSIM > 0.6 target:** Achieved **0.937** on reconstruction (Section 6.1), exceeding threshold on 540/540 test samples
-- **Distribution fidelity (KID):** Reported for 1,500 samples per model (Section 6.1)
-- **Resource profiling:** Peak GPU VRAM, epoch time, and generation time documented (Section 6.1)
-- Parameter counts: 1.18M (VQ-VAE), 2.13M (PixelCNN), 3.2M/2.8M (DCGAN)
-
-**✅ Qualitative Autopsy & Memorization Audit (Required):**
-- **Uncurated sample grids:** Fixed-seed grids for all models (Section 6.2)
-- **Failure case autopsy:** 4 cases selected by numeric rules, not cherry-picked (Section 6.4)
-- **Nearest-neighbor distance audit:** Comprehensive screening against training data (Sections 6.3, 6.6.2)
-  - No exact duplicates found (uint8 conversion check)
-  - Minimum pairwise distance: 20.9 between generated samples
-  - Mean pairwise distance: 36.0 (high diversity)
-  - 3.9% below validation-calibrated threshold (with brightness correlation caveat documented)
-- **Memorization evidence:** All generated samples visually distinct from nearest training matches (Section 6.2)
-
-**✅ Open Research Dilemma Investigation (Required):**
-- **"Fidelity vs. Memorization vs. Privacy Dilemma"** thoroughly investigated
-- **8 experimental approaches** tested and documented (Section 6.5.4)
-- **Root cause identified:** PixelCNN blind spot problem (Section 6.5.3)
-- **Solution implemented:** Transformer prior with full self-attention (Section 6.5.4, item 6)
-- **Diversity analysis:** Temperature sweep, pairwise distances (Section 6.6.1)
-- **Distribution analysis:** AI vs real statistical comparison (Section 6.6.3)
-
-**✅ Engineering Recommendation (Required):**
-- Actionable advice for project manager (Section 8)
-- Trade-off analysis: reconstruction vs generation, speed vs quality
-- Deployment readiness assessment with specific constraints
-
-**Additional contributions beyond requirements:**
-- Decoder isolation experiment proving fine codes carry anatomical structure (Section 6.5.2)
-- Systematic investigation of 8 alternative approaches (Section 6.5.4)
-- Discovery and solution of fundamental architectural limitation
-- Comprehensive training curves and convergence analysis (Section 6.5.6)
 
 ## 7. Limitations and Future Work
 
