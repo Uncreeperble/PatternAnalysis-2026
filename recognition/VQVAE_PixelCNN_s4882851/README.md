@@ -702,7 +702,9 @@ numbers that fail statistical tests. Similarly, our generator produces
 | Conditioned fine prior | - | ❌ Failed | Conditioning doesn't fix receptive field |
 | Latent sampling (PCA, mixup) | - | ❌ Failed | Not true learned priors |
 | **Transformer fine prior** | - | ✅ **Success** | Full attention solves blind spot |
-| DCGAN baseline | - | ❌ Failed | Banding artifacts, no anatomy |
+| DCGAN baseline | - | ⚠️ Partial | Realistic anatomy but very low diversity (pixel std 0.0028 vs 0.130 real) |
+
+**DCGAN diversity analysis:** While DCGAN samples showed recognizable hip anatomy (unlike PixelCNN), they suffered from severe mode collapse with across-sample pixel standard deviation of only 0.0028 compared to 0.130 for real scans—samples were nearly identical to each other. No memorization was detected (0 exact training matches, all samples passed validation screen), but the lack of diversity makes DCGAN unsuitable for data augmentation despite anatomical plausibility.
 
 **Key insight:** The critical factor was not the VQ-VAE architecture (which worked
 excellently for reconstruction) but the **prior's ability to model long-range
@@ -869,7 +871,55 @@ All code was tested, all results were validated, and all claims were verified ag
 
 ---
 
-## Appendix A: Complete Feasibility Review (As Submitted)
+## Appendix A: Additional Experimental Figures
+
+This appendix contains supplementary figures from the experimental investigation that provide additional context and visual evidence for the findings reported in Section 6.
+
+### A.1 Experiment Comparison Overview
+
+![Experiment comparison](figures/experiment_comparison.png)
+
+*Figure A.1: Side-by-side comparison of all eight experimental approaches tested during the investigation, showing the progression from PixelCNN failure to Transformer success.*
+
+### A.2 Receptive Field Visualization
+
+![Receptive field comparison](figures/receptive_field_comparison.png)
+
+*Figure A.2: Visual comparison of PixelCNN's limited receptive field (~19 rows) versus Transformer's full attention over all 2,048 code positions.*
+
+### A.3 Failure vs Success Comparison
+
+![Failure vs success](figures/failure_vs_success_comparison.png)
+
+*Figure A.3: Direct comparison between failed PixelCNN samples (left) and successful Transformer samples (right), highlighting the anatomical coherence achieved by full self-attention.*
+
+### A.4 Labeled Real vs Generated Comparison
+
+![Labeled comparison](figures/labeled_real_vs_generated.png)
+
+*Figure A.4: Annotated comparison showing anatomical landmarks (femoral heads, pelvic bones, tissue boundaries) in real scans versus Transformer-generated samples.*
+
+### A.5 Transformer Sample Grid
+
+![Transformer sample grid](figures/transformer_samples_grid.png)
+
+*Figure A.5: Extended grid of Transformer-generated samples (32 samples) demonstrating diversity and anatomical consistency across multiple generations.*
+
+### A.6 Reconstruction Grid
+
+![Reconstruction grid](figures/reconstruction_grid.png)
+
+*Figure A.6: Grid of VQ-VAE-2 reconstructions showing consistent high-quality reconstruction across diverse anatomical variations in the test set.*
+
+### A.7 Distribution Analysis (Experiment 6)
+
+![Distribution analysis](figures/exp6_distribution_analysis.png)
+
+*Figure A.7: Detailed statistical analysis from Experiment 6 (Transformer prior) showing intensity distributions, bright pixel fractions, and pairwise distance metrics.*
+
+---
+
+## Appendix B: Complete Feasibility Review (As Submitted)
 
 *This is the exact 1-page feasibility review submitted before experiments began.*
 
